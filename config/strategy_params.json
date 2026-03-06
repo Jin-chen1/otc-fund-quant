@@ -1,0 +1,91 @@
+{
+  "default": {
+    "v6": {
+      "max_position_ratio": 0.80,
+      "soft_stop_loss": -0.18,
+      "hard_stop_loss": -0.25,
+      "min_cooldown": 8,
+      "max_cooldown": 25,
+      "dca_base_ratio": 0.04,
+      "dca_interval": 7,
+      "cheap_percentile": 0.20,
+      "batch_interval": 3,
+      "min_history_days": 250,
+      "trend_batch_ratios": [0.20, 0.15, 0.15],
+      "re_entry_strong_ratio": 0.85,
+      "re_entry_weak_ratio": 0.65,
+      "low_position_ratio": 0.30,
+      "rsi_sell_threshold": 70
+    },
+    "regime_adaptive": {
+      "_inherit": "v6",
+      "adx_trend_threshold": 25,
+      "bull_dca_boost": 1.5,
+      "transition_buy_ratio": 0.15,
+      "transition_sell_ratio": 0.3
+    },
+    "index_momentum": {
+      "max_position_ratio": 0.95,
+      "soft_stop_loss": -0.20,
+      "hard_stop_loss": -0.30,
+      "min_cooldown": 5,
+      "max_cooldown": 15,
+      "dca_base_ratio": 0.08,
+      "dca_oversold_interval": 3,
+      "dca_normal_interval": 5,
+      "min_history_days": 60,
+      "momentum_buy_threshold": 2,
+      "rsi_overbought": 75,
+      "atr_scale_max": 2.0,
+      "low_position_ratio": 0.30,
+      "batch_interval": 3,
+      "trend_batch_ratios": [0.25, 0.20, 0.15],
+      "tail_size": 200,
+      "percentile_window": 150
+    }
+  },
+  "007343": {
+    "v6": {},
+    "regime_adaptive": {},
+    "index_momentum": {}
+  },
+  "022464": {
+    "v6": {
+      "max_position_ratio": 0.85,
+      "soft_stop_loss": -0.20,
+      "hard_stop_loss": -0.28,
+      "min_cooldown": 6,
+      "max_cooldown": 20,
+      "dca_base_ratio": 0.05,
+      "dca_interval": 5,
+      "cheap_percentile": 0.25,
+      "min_history_days": 120,
+      "trend_batch_ratios": [0.22, 0.18, 0.15],
+      "rsi_sell_threshold": 75,
+      "tail_size": 200,
+      "percentile_window": 150,
+      "rsi_buy_low": 30,
+      "rsi_buy_high": 70,
+      "rsi_extreme_overbought": 85
+    },
+    "regime_adaptive": {
+      "adx_trend_threshold": 22,
+      "bull_dca_boost": 1.8,
+      "transition_buy_ratio": 0.18,
+      "transition_sell_ratio": 0.25
+    },
+    "index_momentum": {
+      "max_position_ratio": 0.97,
+      "dca_base_ratio": 0.08,
+      "dca_normal_interval": 4,
+      "dca_oversold_interval": 2,
+      "momentum_buy_threshold": 2,
+      "rsi_overbought": 93,
+      "atr_scale_max": 2.5,
+      "min_cooldown": 4,
+      "max_cooldown": 12,
+      "batch_interval": 1,
+      "trend_batch_ratios": [0.97]
+    }
+  }
+}

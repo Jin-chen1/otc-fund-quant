@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE and local workspace
+.vscode/
+.idea/
+.windsurf/
+
+# Runtime outputs
+results/
+*.log
+
+# Local databases and caches
+data/*.db
+web/*.db
+
+# Archives and ad hoc files
+*.zip
+*.7z
+*.rar
+
+# OS files
+Thumbs.db
+.DS_Store

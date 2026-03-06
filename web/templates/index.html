@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>基金分析终端</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-secondary: #111827;
+            --bg-card: #151d2e;
+            --bg-card-hover: #1a2540;
+            --border-primary: #1e2d4a;
+            --border-glow: rgba(56, 189, 248, 0.2);
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent-cyan: #38bdf8;
+            --accent-teal: #2dd4bf;
+            --accent-buy: #34d399;
+            --accent-buy-bg: rgba(52, 211, 153, 0.08);
+            --accent-buy-border: rgba(52, 211, 153, 0.25);
+            --accent-sell: #f87171;
+            --accent-sell-bg: rgba(248, 113, 113, 0.08);
+            --accent-sell-border: rgba(248, 113, 113, 0.25);
+            --accent-hold: #fbbf24;
+            --accent-hold-bg: rgba(251, 191, 36, 0.08);
+            --accent-hold-border: rgba(251, 191, 36, 0.25);
+            --accent-purple: #a78bfa;
+            --glass: rgba(15, 23, 42, 0.6);
+            --glass-border: rgba(56, 189, 248, 0.08);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Noto Sans SC', -apple-system, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* 背景网格纹理 */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-image:
+                linear-gradient(rgba(56, 189, 248, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(56, 189, 248, 0.03) 1px, transparent 1px);
+            background-size: 60px 60px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* 顶部光晕 */
+        body::after {
+            content: '';
+            position: fixed;
+            top: -200px; left: 50%;
+            transform: translateX(-50%);
+            width: 800px; height: 400px;
+            background: radial-gradient(ellipse, rgba(56, 189, 248, 0.06) 0%, transparent 70%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .mono { font-family: 'JetBrains Mono', monospace; }
+
+        /* 卡片 */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-primary);
+            border-radius: 12px;
+            position: relative;
+            overflow: hidden;
+            transition: border-color 0.3s, box-shadow 0.3s, transform 0.2s;
+        }
+        .card:hover {
+            border-color: var(--border-glow);
+            box-shadow: 0 0 20px rgba(56, 189, 248, 0.05);
+        }
+
+        /* 信号卡片 */
+        .signal-buy {
+            background: linear-gradient(135deg, var(--accent-buy-bg), rgba(52, 211, 153, 0.03));
+            border-color: var(--accent-buy-border);
+        }
+        .signal-sell {
+            background: linear-gradient(135deg, var(--accent-sell-bg), rgba(248, 113, 113, 0.03));
+            border-color: var(--accent-sell-border);
+        }
+        .signal-hold {
+            background: linear-gradient(135deg, var(--accent-hold-bg), rgba(251, 191, 36, 0.03));
+            border-color: var(--accent-hold-border);
+        }
+
+        /* 指标卡片 */
+        .indicator-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-primary);
+            border-radius: 10px;
+            padding: 14px 12px;
+            text-align: center;
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+        }
+        .indicator-card:hover {
+            transform: translateY(-3px);
+            border-color: var(--accent-cyan);
+            box-shadow: 0 8px 24px rgba(56, 189, 248, 0.08);
+        }
+        .indicator-card::after {
+            content: '';
+            position: absolute;
+            bottom: 0; left: 20%; right: 20%;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--accent-cyan), transparent);
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .indicator-card:hover::after { opacity: 0.5; }
+
+        /* 策略标签 */
+        .strategy-tab {
+            padding: 8px 20px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            border: 1px solid var(--border-primary);
+            background: transparent;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: all 0.25s;
+            font-family: 'Noto Sans SC', sans-serif;
+        }
+        .strategy-tab:hover {
+            border-color: var(--text-muted);
+            color: var(--text-secondary);
+        }
+        .strategy-tab.active {
+            background: linear-gradient(135deg, rgba(56, 189, 248, 0.15), rgba(45, 212, 191, 0.1));
+            border-color: var(--accent-cyan);
+            color: var(--accent-cyan);
+            box-shadow: 0 0 16px rgba(56, 189, 248, 0.1);
+        }
+
+        /* 按钮 */
+        .btn-primary {
+            padding: 10px 28px;
+            background: linear-gradient(135deg, #0ea5e9, #06b6d4);
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: 'Noto Sans SC', sans-serif;
+            letter-spacing: 0.5px;
+        }
+        .btn-primary:hover {
+            box-shadow: 0 4px 20px rgba(14, 165, 233, 0.3);
+            transform: translateY(-1px);
+        }
+        .btn-primary:active { transform: translateY(0); }
+        .btn-primary:disabled { opacity: 0.5; pointer-events: none; }
+
+        /* 输入框 */
+        .input-field {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-primary);
+            border-radius: 8px;
+            padding: 10px 16px;
+            color: var(--accent-cyan);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 18px;
+            font-weight: 600;
+            letter-spacing: 2px;
+            outline: none;
+            width: 200px;
+            transition: all 0.25s;
+        }
+        .input-field:focus {
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.1);
+        }
+        .input-field::placeholder {
+            color: var(--text-muted);
+            font-size: 13px;
+            font-weight: 400;
+            letter-spacing: 0;
+        }
+
+        /* 表格 */
+        .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .data-table thead th {
+            padding: 10px 14px;
+            text-align: left;
+            color: var(--text-muted);
+            font-weight: 500;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            border-bottom: 1px solid var(--border-primary);
+        }
+        .data-table tbody tr {
+            border-bottom: 1px solid rgba(30, 45, 74, 0.5);
+            transition: background 0.15s;
+        }
+        .data-table tbody tr:hover { background: rgba(56, 189, 248, 0.03); }
+        .data-table td {
+            padding: 10px 14px;
+            color: var(--text-secondary);
+        }
+
+        /* 动画 */
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(16px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes pulse-glow {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+        .animate-in {
+            animation: fadeInUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+            opacity: 0;
+        }
+        .loading-shimmer {
+            background: linear-gradient(90deg, transparent, rgba(56,189,248,0.05), transparent);
+            background-size: 200% 100%;
+            animation: shimmer 1.5s infinite;
+        }
+
+        .correct-yes { color: var(--accent-buy); font-weight: 600; }
+        .correct-no { color: var(--accent-sell); font-weight: 600; }
+        .correct-pending { color: var(--text-muted); }
+
+        .color-buy { color: var(--accent-buy); }
+        .color-sell { color: var(--accent-sell); }
+        .color-hold { color: var(--accent-hold); }
+        .color-cyan { color: var(--accent-cyan); }
+        .color-purple { color: var(--accent-purple); }
+        .color-muted { color: var(--text-muted); }
+
+        .hidden { display: none !important; }
+
+        /* 滚动条 */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg-primary); }
+        ::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+    </style>
+</head>
+<body>
+
+<!-- 顶部导航 -->
+<nav style="background: rgba(10,14,23,0.85); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border-primary); position: sticky; top: 0; z-index: 50;">
+    <div style="max-width: 1280px; margin: 0 auto; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+            <div style="width: 8px; height: 8px; border-radius: 50%; background: var(--accent-cyan); box-shadow: 0 0 8px var(--accent-cyan);"></div>
+            <h1 style="font-size: 17px; font-weight: 700; letter-spacing: 0.5px;">
+                基金分析终端
+            </h1>
+            <span id="nav-strategy-label" class="mono" style="font-size: 12px; color: var(--text-muted); margin-left: 4px;">V6</span>
+        </div>
+        <div class="mono" style="font-size: 12px; color: var(--text-muted);" id="update-time"></div>
+    </div>
+</nav>
+
+<!-- 主内容区 -->
+<div style="max-width: 1280px; margin: 0 auto; padding: 24px; position: relative; z-index: 1;">
+
+    <!-- 输入区 -->
+    <div class="card" style="padding: 24px; margin-bottom: 20px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;">
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <label style="font-size: 13px; color: var(--text-muted); white-space: nowrap;">基金代码</label>
+                <input type="text" id="fund-code" value="007343" class="input-field mono" placeholder="如 007343" />
+                <button id="btn-analyze" onclick="analyzeFund()" class="btn-primary">
+                    <span id="btn-text">分析</span>
+                    <span id="btn-loading" class="hidden">分析中...</span>
+                </button>
+            </div>
+            <div id="fund-info" class="hidden" style="text-align: right;">
+                <div class="mono" style="font-size: 28px; font-weight: 700; color: var(--accent-cyan);" id="fund-nav">--</div>
+                <div style="font-size: 12px; color: var(--text-muted);" id="fund-date">最新净值</div>
+                <div class="mono" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;" id="fund-data-range"></div>
+            </div>
+        </div>
+
+        <!-- 策略切换 -->
+        <div style="margin-top: 16px; display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 12px; color: var(--text-muted); margin-right: 4px;">策略</span>
+            <button id="tab-v6" onclick="switchStrategy('v6')" class="strategy-tab active">V6 估值趋势</button>
+            <button id="tab-regime" onclick="switchStrategy('regime_adaptive')" class="strategy-tab">状态自适应</button>
+            <button id="tab-index-mom" onclick="switchStrategy('index_momentum')" class="strategy-tab" style="display:none;">指数动量</button>
+            <span id="strategy-hint" style="font-size: 11px; color: var(--text-muted); margin-left: 8px;">切换后自动重新分析</span>
+        </div>
+        <!-- 策略简介 -->
+        <div id="strategy-desc" style="margin-top: 12px; padding: 10px 14px; background: rgba(56,189,248,0.04); border: 1px solid var(--border-primary); border-radius: 8px; font-size: 12px; color: var(--text-secondary); line-height: 1.7;"></div>
+        <!-- 策略参数展示 -->
+        <div id="strategy-params" class="hidden" style="margin-top: 8px; padding: 10px 14px; background: rgba(167,139,250,0.04); border: 1px solid var(--border-primary); border-radius: 8px; font-size: 12px; color: var(--text-secondary); line-height: 1.8;">
+        </div>
+    </div>
+
+    <!-- 错误提示 -->
+    <div id="error-msg" class="hidden" style="background: var(--accent-sell-bg); border: 1px solid var(--accent-sell-border); color: var(--accent-sell); padding: 12px 16px; border-radius: 10px; font-size: 14px; margin-bottom: 20px;"></div>
+
+    <!-- 主体内容 -->
+    <div id="main-content" class="hidden">
+
+        <!-- 今日建议 + 市场状态 -->
+        <div id="recommendation-card" class="card" style="padding: 24px; margin-bottom: 20px; border-width: 1px;">
+            <div style="display: flex; align-items: flex-start; justify-content: space-between;">
+                <div>
+                    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+                        <span id="rec-action" style="font-size: 28px; font-weight: 700;" class="mono"></span>
+                        <span id="rec-badge" style="padding: 4px 14px; border-radius: 6px; font-size: 12px; font-weight: 600;"></span>
+                        <!-- 市场状态（行内显示） -->
+                        <span id="regime-badge" style="display:none; padding: 4px 14px; border-radius: 6px; font-size: 12px; font-weight: 700;">--</span>
+                    </div>
+                    <p id="rec-reason" style="color: var(--text-secondary); font-size: 13px; line-height: 1.7; max-width: 800px;"></p>
+                </div>
+                <span id="rec-auto-saved" style="font-size: 11px; color: var(--text-muted); white-space: nowrap; opacity: 0.6;">&#9679; 自动记录</span>
+            </div>
+        </div>
+
+        <!-- 隐藏的regime辅助元素 -->
+        <div id="regime-row" style="display:none;">
+            <span id="regime-desc" style="display:none;"></span>
+        </div>
+
+        <!-- 区间收益 -->
+        <div id="period-returns" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 20px;"></div>
+
+        <!-- 指标面板 -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin-bottom: 20px;">
+            <div class="indicator-card">
+                <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px;">百分位</div>
+                <div id="ind-percentile" class="mono" style="font-size: 20px; font-weight: 700;">--</div>
+            </div>
+            <div class="indicator-card">
+                <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px;">RSI(14)</div>
+                <div id="ind-rsi" class="mono" style="font-size: 20px; font-weight: 700;">--</div>
+            </div>
+            <div class="indicator-card">
+                <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px;">MA20</div>
+                <div id="ind-ma20" class="mono" style="font-size: 20px; font-weight: 700;">--</div>
+            </div>
+            <div class="indicator-card">
+                <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px;">MA60</div>
+                <div id="ind-ma60" class="mono" style="font-size: 20px; font-weight: 700;">--</div>
+            </div>
+            <div class="indicator-card">
+                <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px;">金叉 / 死叉</div>
+                <div id="ind-cross" style="font-size: 18px; font-weight: 700;">--</div>
+            </div>
+            <div class="indicator-card">
+                <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px;">MACD 柱</div>
+                <div id="ind-macd" class="mono" style="font-size: 20px; font-weight: 700;">--</div>
+            </div>
+            <div id="card-adx" class="indicator-card" style="display:none;">
+                <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px;">ADX(14)</div>
+                <div id="ind-adx" class="mono" style="font-size: 20px; font-weight: 700;">--</div>
+            </div>
+            <div id="card-atr" class="indicator-card" style="display:none;">
+                <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px;">ATR(14)</div>
+                <div id="ind-atr" class="mono" style="font-size: 20px; font-weight: 700;">--</div>
+            </div>
+        </div>
+
+        <!-- 图表 -->
+        <div class="card" style="padding: 16px; margin-bottom: 20px;">
+            <div id="chart-signals" style="height: 380px;"></div>
+        </div>
+
+        <!-- 历史记录 -->
+        <div class="card" style="padding: 24px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
+                <h3 style="font-size: 15px; font-weight: 700;">历史建议记录</h3>
+                <div id="rec-summary" class="mono" style="font-size: 13px; color: var(--text-muted);"></div>
+            </div>
+            <div id="rec-history-empty" class="hidden" style="color: var(--text-muted); font-size: 13px; padding: 20px 0; text-align: center;">暂无记录</div>
+            <div style="overflow-x: auto;">
+                <table id="rec-table" class="data-table hidden">
+                    <thead>
+                        <tr>
+                            <th>日期</th>
+                            <th>建议</th>
+                            <th>当日NAV</th>
+                            <th>次日NAV</th>
+                            <th>涨跌</th>
+                            <th>结果</th>
+                            <th>理由</th>
+                        </tr>
+                    </thead>
+                    <tbody id="rec-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<script>
+// ===== 全局状态 =====
+let currentData = null;
+let currentStrategy = 'v6';
+let _abortController = null;
+
+const STRATEGY_DESC = {
+    'v6': '基于估值百分位 + 趋势信号的混合策略。在低估值区间（百分位<20%）叠加 MA 金叉、RSI 超卖等技术信号触发买入，高 RSI 或死叉触发卖出。含 DCA 定投（4%/7天/低估加码）、8~25天冷却期、止损机制。',
+    'regime_adaptive': '基于 ADX 判断市场状态（趋势/震荡），动态切换交易逻辑。趋势市顺势操作（牛市宽松买入、熊市严格止损），震荡市采用区间策略（低买高卖）。融合估值百分位 + RSI + MACD + ATR 波动率自适应仓位管理。',
+    'index_momentum': '专为指数ETF设计。用布林带替代百分位估值（仅需20日数据），6维动量评分驱动批量建仓（5日/10日/20日动量+MA20+MACD+下轨反弹），正常区定期DCA兜底，ATR自适应仓位管理。超卖区加速定投、超买区暂停买入。适合短历史、高流动性的宽基指数基金。'
+};
+
+function updateStrategyDesc(strategy) {
+    document.getElementById('strategy-desc').textContent = STRATEGY_DESC[strategy] || '';
+}
+
+// ===== 策略切换 =====
+function switchStrategy(strategy) {
+    if (strategy === currentStrategy) return;
+    currentStrategy = strategy;
+
+    document.querySelectorAll('.strategy-tab').forEach(btn => btn.classList.remove('active'));
+    const tabMap = { 'v6': 'tab-v6', 'regime_adaptive': 'tab-regime', 'index_momentum': 'tab-index-mom' };
+    document.getElementById(tabMap[strategy]).classList.add('active');
+
+    const strategyNames = { 'v6': 'V6', 'regime_adaptive': 'REGIME', 'index_momentum': 'MOMENTUM' };
+    document.getElementById('nav-strategy-label').textContent = strategyNames[strategy] || strategy;
+    updateStrategyDesc(strategy);
+
+    const code = document.getElementById('fund-code').value.trim();
+    if (code) analyzeFund();
+}
+
+// ===== 指数动量策略tab可见性控制 =====
+const INDEX_MOMENTUM_FUNDS = ['022464'];
+function updateIndexMomTabVisibility() {
+    const code = document.getElementById('fund-code').value.trim();
+    const tab = document.getElementById('tab-index-mom');
+    const show = INDEX_MOMENTUM_FUNDS.includes(code);
+    tab.style.display = show ? '' : 'none';
+    // 如果当前选中的是指数动量但基金不支持，自动切回 v6
+    if (!show && currentStrategy === 'index_momentum') {
+        switchStrategy('v6');
+    }
+}
+document.getElementById('fund-code').addEventListener('input', updateIndexMomTabVisibility);
+
+// ===== 分析基金 =====
+async function analyzeFund() {
+    const code = document.getElementById('fund-code').value.trim();
+    if (!code) { showError('请输入基金代码'); return; }
+    updateIndexMomTabVisibility();
+
+    // 取消上一个未完成的请求，防止旧响应覆盖新数据
+    if (_abortController) _abortController.abort();
+    _abortController = new AbortController();
+    const signal = _abortController.signal;
+
+    setLoading(true);
+    hideError();
+
+    try {
+        const resp = await fetch('/api/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fund_code: code, strategy: currentStrategy }),
+            signal: signal,
+        });
+        const data = await resp.json();
+        if (!resp.ok) { showError(data.error || '分析失败'); return; }
+
+        currentData = data;
+        renderAll(data);
+        document.getElementById('main-content').classList.remove('hidden');
+        document.getElementById('update-time').textContent = new Date().toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    } catch (e) {
+        if (e.name === 'AbortError') return; // 被新请求取消，忽略
+        showError('网络错误: ' + e.message);
+    } finally {
+        setLoading(false);
+    }
+}
+
+// ===== 渲染全部 =====
+function renderAll(data) {
+    const isRegime = (data.strategy === 'regime_adaptive');
+    renderFundInfo(data);
+    renderRecommendation(data.recommendation, isRegime);
+    renderIndicators(data.recommendation.indicators, isRegime);
+    renderPeriodReturns(data.period_returns);
+    renderSignalChart(data.chart, data.signal_points);
+    renderRecHistory(data.rec_history);
+    renderStrategyParams(data.strategy_params, isRegime);
+
+    const adxCard = document.getElementById('card-adx');
+    const atrCard = document.getElementById('card-atr');
+    if (adxCard) adxCard.style.display = isRegime ? '' : 'none';
+    if (atrCard) atrCard.style.display = isRegime ? '' : 'none';
+}
+
+// ===== 策略参数展示 =====
+function renderStrategyParams(params, isRegime) {
+    const el = document.getElementById('strategy-params');
+    if (!params) { el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+
+    const pctFmt = v => v != null ? (v * 100).toFixed(0) + '%' : '-';
+    const isIndexMom = (currentStrategy === 'index_momentum');
+
+    // 通用参数
+    const items = [
+        ['持仓上限', pctFmt(params.max_position_ratio)],
+        ['软止损', pctFmt(params.soft_stop_loss)],
+        ['硬止损', pctFmt(params.hard_stop_loss)],
+        ['冷静期', params.min_cooldown + '~' + params.max_cooldown + '天'],
+        ['DCA比例', pctFmt(params.dca_base_ratio)],
+    ];
+
+    if (isIndexMom) {
+        // 指数动量专属参数
+        items.push(['超卖DCA间隔', (params.dca_oversold_interval || 3) + '天']);
+        items.push(['动量阈值', (params.momentum_buy_threshold || 3) + '/6']);
+        items.push(['RSI超买', params.rsi_overbought || 75]);
+        items.push(['分批比例', (params.trend_batch_ratios || []).map(v => pctFmt(v)).join('/')]);
+        if (params.atr_scale_max) {
+            items.push(['ATR上限', params.atr_scale_max + 'x']);
+        }
+        if (params.tail_size) {
+            items.push(['指标窗口', params.tail_size + '天']);
+        }
+    } else {
+        // V6 / regime_adaptive 参数
+        items.push(['DCA间隔', (params.dca_interval || 7) + '天']);
+        items.push(['低估阈值', pctFmt(params.cheap_percentile)]);
+        items.push(['RSI卖出', params.rsi_sell_threshold || 70]);
+        items.push(['分批比例', (params.trend_batch_ratios || []).map(v => pctFmt(v)).join('/')]);
+        if (params.tail_size && params.tail_size !== 600) {
+            items.push(['指标窗口', params.tail_size + '天']);
+        }
+        if (params.percentile_window && params.percentile_window !== 500) {
+            items.push(['估值窗口', params.percentile_window + '天']);
+        }
+        if (params.rsi_buy_low != null && params.rsi_buy_low !== 35) {
+            items.push(['RSI买入区间', params.rsi_buy_low + '~' + (params.rsi_buy_high || 65)]);
+        }
+        if (params.rsi_extreme_overbought && params.rsi_extreme_overbought !== 80) {
+            items.push(['极度超买', params.rsi_extreme_overbought]);
+        }
+    }
+    if (isRegime) {
+        items.push(['ADX阈值', params.adx_trend_threshold]);
+        items.push(['牛市DCA加速', params.bull_dca_boost + 'x']);
+        items.push(['转换加仓', pctFmt(params.transition_buy_ratio)]);
+        items.push(['转换减仓', pctFmt(params.transition_sell_ratio)]);
+    }
+    el.innerHTML = '<span style="color:var(--accent-purple);font-weight:600;">策略参数</span> ' +
+        items.map(([k, v]) => `<span style="margin-left:12px;"><span style="color:var(--text-muted);">${k}</span> <span class="mono" style="color:var(--text-primary);">${v}</span></span>`).join('');
+}
+
+// ===== 基金信息 =====
+function renderFundInfo(data) {
+    document.getElementById('fund-info').classList.remove('hidden');
+    document.getElementById('fund-nav').textContent = data.latest_nav.toFixed(4);
+    document.getElementById('fund-date').textContent = data.latest_date + ' 净值';
+    document.getElementById('fund-data-range').textContent = data.data_count + ' 个交易日';
+}
+
+// ===== 建议卡片 =====
+function renderRecommendation(rec, isRegime) {
+    const card = document.getElementById('recommendation-card');
+    card.className = 'card';
+    card.style.padding = '24px';
+    card.style.marginBottom = '20px';
+    card.style.borderWidth = '1px';
+
+    const actionMap = {
+        'BUY':  { text: '▲ BUY',  cls: 'signal-buy',  badgeBg: 'rgba(52,211,153,0.15)', badgeColor: '#34d399' },
+        'SELL': { text: '▼ SELL', cls: 'signal-sell', badgeBg: 'rgba(248,113,113,0.15)', badgeColor: '#f87171' },
+        'HOLD': { text: '— HOLD', cls: 'signal-hold', badgeBg: 'rgba(251,191,36,0.15)',  badgeColor: '#fbbf24' },
+    };
+    const info = actionMap[rec.action] || actionMap['HOLD'];
+
+    card.classList.add(info.cls);
+    const actionEl = document.getElementById('rec-action');
+    actionEl.textContent = info.text;
+    actionEl.style.color = info.badgeColor;
+
+    const badge = document.getElementById('rec-badge');
+    if (isRegime && rec.regime_info) {
+        const regimeLabel = { 'BULL': '牛市', 'BEAR': '熊市', 'RANGE': '震荡' };
+        badge.textContent = (regimeLabel[rec.regime_info.current] || '未知') + ' │ 评分 ' + rec.buy_score + '/3';
+    } else {
+        badge.textContent = '评分 ' + rec.buy_score + '/3';
+    }
+    badge.style.background = info.badgeBg;
+    badge.style.color = info.badgeColor;
+
+    // 市场状态 badge
+    const regimeBadge = document.getElementById('regime-badge');
+    if (isRegime && rec.regime_info) {
+        const regimeStyles = {
+            'BULL':  { text: 'BULL',  bg: 'rgba(52,211,153,0.12)', color: '#34d399', border: 'rgba(52,211,153,0.3)' },
+            'BEAR':  { text: 'BEAR',  bg: 'rgba(248,113,113,0.12)', color: '#f87171', border: 'rgba(248,113,113,0.3)' },
+            'RANGE': { text: 'RANGE', bg: 'rgba(251,191,36,0.12)', color: '#fbbf24', border: 'rgba(251,191,36,0.3)' },
+        };
+        const rs = regimeStyles[rec.regime_info.current] || regimeStyles['RANGE'];
+        regimeBadge.textContent = rs.text;
+        regimeBadge.style.display = '';
+        regimeBadge.style.background = rs.bg;
+        regimeBadge.style.color = rs.color;
+        regimeBadge.style.border = '1px solid ' + rs.border;
+    } else {
+        regimeBadge.style.display = 'none';
+    }
+
+    document.getElementById('rec-reason').textContent = rec.reason;
+}
+
+// ===== 区间收益 =====
+function renderPeriodReturns(returns) {
+    const container = document.getElementById('period-returns');
+    if (!returns || returns.length === 0) { container.innerHTML = ''; return; }
+    container.innerHTML = returns.map((r, i) => {
+        const sp = r.strategy_pct;
+        const fp = r.fund_pct;
+        const sColor = sp >= 0 ? 'var(--accent-sell)' : 'var(--accent-buy)';
+        const sSign = sp >= 0 ? '+' : '';
+        const fColor = fp >= 0 ? 'var(--accent-sell)' : 'var(--accent-buy)';
+        const fSign = fp >= 0 ? '+' : '';
+        const borderColor = sp >= 0 ? 'rgba(248,113,113,0.2)' : 'rgba(52,211,153,0.2)';
+        const delay = i * 60;
+        return `<div class="indicator-card animate-in" style="animation-delay:${delay}ms; border-color: ${borderColor};">
+            <div style="font-size:11px; color:var(--text-muted); margin-bottom:8px;">${r.label} <span style="opacity:0.5">${r.days}天</span></div>
+            <div class="mono" style="font-size:22px; font-weight:700; color:${sColor};">${sSign}${sp.toFixed(2)}%</div>
+            <div style="margin-top:6px; font-size:11px; color:var(--text-muted);">基金 <span class="mono" style="color:${fColor}">${fSign}${fp.toFixed(2)}%</span></div>
+        </div>`;
+    }).join('');
+}
+
+// ===== 指标面板 =====
+function renderIndicators(ind, isRegime) {
+    if (!ind) return;
+
+    const pct = document.getElementById('ind-percentile');
+    pct.textContent = (ind.percentile * 100).toFixed(1) + '%';
+    pct.style.color = 'var(--accent-purple)';
+
+    const rsi = document.getElementById('ind-rsi');
+    rsi.textContent = ind.rsi.toFixed(1);
+    rsi.style.color = 'var(--accent-purple)';
+
+    const ma20El = document.getElementById('ind-ma20');
+    ma20El.textContent = ind.ma20 ? ind.ma20.toFixed(4) : '--';
+    ma20El.style.color = 'var(--accent-purple)';
+
+    const ma60El = document.getElementById('ind-ma60');
+    ma60El.textContent = ind.ma60 ? ind.ma60.toFixed(4) : '--';
+    ma60El.style.color = 'var(--accent-purple)';
+
+    const cross = document.getElementById('ind-cross');
+    if (ind.gold_cross) { cross.textContent = '金叉 ↑'; cross.style.color = 'var(--accent-buy)'; }
+    else if (ind.death_cross) { cross.textContent = '死叉 ↓'; cross.style.color = 'var(--accent-sell)'; }
+    else { cross.textContent = ind.above_ma20 ? 'MA20上方' : 'MA20下方'; cross.style.color = 'var(--accent-purple)'; }
+
+    const macd = document.getElementById('ind-macd');
+    macd.textContent = ind.macd_hist > 0 ? '+' + ind.macd_hist.toFixed(4) : ind.macd_hist.toFixed(4);
+    macd.style.color = 'var(--accent-purple)';
+
+    const adxEl = document.getElementById('ind-adx');
+    if (adxEl && ind.adx !== undefined) {
+        adxEl.textContent = ind.adx.toFixed(1);
+        adxEl.style.color = 'var(--accent-purple)';
+    }
+    const atrEl = document.getElementById('ind-atr');
+    if (atrEl && ind.atr !== undefined) {
+        atrEl.textContent = ind.atr.toFixed(4);
+        atrEl.style.color = 'var(--accent-purple)';
+    }
+}
+
+// ===== 日期刻度工具 =====
+function _monthTicks(dates) {
+    const ticks = [];
+    let lastYM = '';
+    for (const d of dates) {
+        const ym = d.substring(0, 7);
+        if (ym !== lastYM) { ticks.push(d); lastYM = ym; }
+    }
+    return ticks;
+}
+function _monthLabels(dates) {
+    return _monthTicks(dates).map(d => d.substring(2, 4) + '.' + d.substring(5, 7));
+}
+
+// ===== 买卖点标记图（暗色主题） =====
+function renderSignalChart(chart, signals) {
+    if (!chart || !signals) return;
+
+    const n = chart.dates.length;
+    const start = Math.max(0, n - 250);
+    const dates1y = chart.dates.slice(start);
+    const nav1y = chart.nav.slice(start);
+    const ma201y = chart.ma20.slice(start);
+    const ma601y = chart.ma60.slice(start);
+    const cutoff = dates1y[0];
+
+    let buyD = [], buyN = [], sellD = [], sellN = [];
+    for (let i = 0; i < signals.buy_dates.length; i++) {
+        if (signals.buy_dates[i] >= cutoff) { buyD.push(signals.buy_dates[i]); buyN.push(signals.buy_navs[i]); }
+    }
+    for (let i = 0; i < signals.sell_dates.length; i++) {
+        if (signals.sell_dates[i] >= cutoff) { sellD.push(signals.sell_dates[i]); sellN.push(signals.sell_navs[i]); }
+    }
+
+    const navTrace = { x: dates1y, y: nav1y, name: 'NAV', type: 'scatter',
+        line: { color: '#38bdf8', width: 1.8 } };
+    const ma20Trace = { x: dates1y, y: ma201y, name: 'MA20', type: 'scatter',
+        line: { color: '#fbbf24', width: 1, dash: 'dot' }, opacity: 0.7 };
+    const ma60Trace = { x: dates1y, y: ma601y, name: 'MA60', type: 'scatter',
+        line: { color: '#a78bfa', width: 1, dash: 'dot' }, opacity: 0.7 };
+    const buyTrace = { x: buyD, y: buyN, name: 'BUY (' + buyD.length + ')',
+        mode: 'markers', type: 'scatter',
+        marker: { symbol: 'triangle-up', size: 11, color: '#34d399',
+                  line: { width: 1.5, color: '#059669' } } };
+    const sellTrace = { x: sellD, y: sellN, name: 'SELL (' + sellD.length + ')',
+        mode: 'markers', type: 'scatter',
+        marker: { symbol: 'triangle-down', size: 11, color: '#f87171',
+                  line: { width: 1.5, color: '#dc2626' } } };
+
+    const darkLayout = {
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        title: { text: '近一年买卖点标记', font: { size: 13, color: '#94a3b8', family: 'Noto Sans SC' }, x: 0.01, xanchor: 'left' },
+        dragmode: 'pan',
+        xaxis: {
+            type: 'category', nticks: 12,
+            tickvals: _monthTicks(dates1y), ticktext: _monthLabels(dates1y),
+            rangeslider: { visible: false },
+            gridcolor: 'rgba(30,45,74,0.5)',
+            tickfont: { color: '#64748b', size: 11, family: 'JetBrains Mono' },
+            linecolor: 'rgba(30,45,74,0.5)',
+            zerolinecolor: 'rgba(30,45,74,0.5)',
+        },
+        yaxis: {
+            title: { text: 'NAV', font: { color: '#64748b', size: 11 } },
+            gridcolor: 'rgba(30,45,74,0.4)',
+            tickfont: { color: '#64748b', size: 11, family: 'JetBrains Mono' },
+            linecolor: 'rgba(30,45,74,0.5)',
+            zerolinecolor: 'rgba(30,45,74,0.5)',
+        },
+        margin: { l: 55, r: 16, t: 40, b: 30 },
+        legend: { orientation: 'h', y: 1.18, x: 1, xanchor: 'right',
+                  font: { color: '#94a3b8', size: 11, family: 'Noto Sans SC' },
+                  bgcolor: 'rgba(0,0,0,0)' },
+        hovermode: 'x unified',
+        hoverlabel: { bgcolor: '#1e293b', bordercolor: '#334155', font: { color: '#e2e8f0', family: 'JetBrains Mono', size: 12 } },
+    };
+
+    const chartEl = document.getElementById('chart-signals');
+    Plotly.newPlot(chartEl, [navTrace, ma20Trace, ma60Trace, buyTrace, sellTrace], darkLayout,
+        { responsive: true, displayModeBar: false, scrollZoom: true,
+          doubleClickDelay: 1000, showTips: false });
+
+    // 缩放时自动调整Y轴范围，使曲线始终居中
+    let _adjustingY = false;
+    chartEl.on('plotly_relayout', function(eventData) {
+        if (_adjustingY) return;
+        let xRange = eventData['xaxis.range'];
+        if (!xRange) {
+            const x0 = eventData['xaxis.range[0]'];
+            const x1 = eventData['xaxis.range[1]'];
+            if (x0 !== undefined && x1 !== undefined) xRange = [x0, x1];
+            else return;
+        }
+
+        const x0 = Math.max(0, Math.floor(xRange[0]));
+        const x1 = Math.min(nav1y.length - 1, Math.ceil(xRange[1]));
+        if (x0 >= x1) return;
+
+        let yMin = Infinity, yMax = -Infinity;
+        for (let i = x0; i <= x1; i++) {
+            const vals = [nav1y[i], ma201y[i], ma601y[i]].filter(v => v != null && !isNaN(v));
+            for (const v of vals) {
+                if (v < yMin) yMin = v;
+                if (v > yMax) yMax = v;
+            }
+        }
+        if (yMin === Infinity) return;
+
+        const pad = (yMax - yMin) * 0.08 || 0.01;
+        _adjustingY = true;
+        Plotly.relayout(chartEl, { 'yaxis.range': [yMin - pad, yMax + pad] }).then(() => { _adjustingY = false; });
+    });
+}
+
+// ===== 历史建议表格 =====
+function renderRecHistory(records) {
+    const tbody = document.getElementById('rec-tbody');
+    const table = document.getElementById('rec-table');
+    const empty = document.getElementById('rec-history-empty');
+    const summary = document.getElementById('rec-summary');
+
+    if (!records || records.length === 0) {
+        table.classList.add('hidden');
+        empty.classList.remove('hidden');
+        if (summary) summary.textContent = '';
+        return;
+    }
+
+    table.classList.remove('hidden');
+    empty.classList.add('hidden');
+    tbody.innerHTML = '';
+
+    let judged = records.filter(r => r.correct === 1 || r.correct === 0);
+    let correctCount = judged.filter(r => r.correct === 1).length;
+    let totalJudged = judged.length;
+    if (summary) {
+        if (totalJudged > 0) {
+            let pct = Math.round(correctCount / totalJudged * 100);
+            let color = pct >= 60 ? 'var(--accent-buy)' : pct >= 40 ? 'var(--accent-hold)' : 'var(--accent-sell)';
+            summary.innerHTML = `<span style="color:${color}">正确率 ${correctCount}/${totalJudged} (${pct}%)</span>`;
+        } else {
+            summary.textContent = '近期均为观望';
+        }
+    }
+
+    records.forEach(r => {
+        const tr = document.createElement('tr');
+
+        let actionColor = r.action === 'BUY' ? 'var(--accent-buy)' : r.action === 'SELL' ? 'var(--accent-sell)' : 'var(--accent-hold)';
+
+        let changeText = '--', changeColor = 'var(--text-muted)';
+        if (r.nav_at_signal && r.next_day_nav) {
+            let pct = ((r.next_day_nav - r.nav_at_signal) / r.nav_at_signal * 100).toFixed(2);
+            changeText = (pct > 0 ? '+' : '') + pct + '%';
+            changeColor = pct > 0 ? 'var(--accent-sell)' : pct < 0 ? 'var(--accent-buy)' : 'var(--text-muted)';
+        }
+
+        let correctText = '', correctCls = 'correct-pending';
+        if (r.correct === 1) { correctText = '✓ 正确'; correctCls = 'correct-yes'; }
+        else if (r.correct === 0) { correctText = '✗ 错误'; correctCls = 'correct-no'; }
+        else if (r.next_day_nav) { correctText = '-'; }
+        else { correctText = '待验证'; }
+
+        tr.innerHTML = `
+            <td class="mono" style="color:var(--text-secondary)">${r.date}</td>
+            <td class="mono" style="font-weight:700; color:${actionColor}">${r.action}</td>
+            <td class="mono">${r.nav_at_signal ? r.nav_at_signal.toFixed(4) : '--'}</td>
+            <td class="mono">${r.next_day_nav ? r.next_day_nav.toFixed(4) : '--'}</td>
+            <td class="mono" style="color:${changeColor}">${changeText}</td>
+            <td class="${correctCls}">${correctText}</td>
+            <td style="color:var(--text-muted); font-size:12px; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${r.reason || ''}">${r.reason || '--'}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+// ===== 工具函数 =====
+function setLoading(loading) {
+    const btn = document.getElementById('btn-analyze');
+    const text = document.getElementById('btn-text');
+    const spin = document.getElementById('btn-loading');
+    if (loading) {
+        btn.disabled = true;
+        text.classList.add('hidden');
+        spin.classList.remove('hidden');
+    } else {
+        btn.disabled = false;
+        text.classList.remove('hidden');
+        spin.classList.add('hidden');
+    }
+}
+
+function showError(msg) {
+    const el = document.getElementById('error-msg');
+    el.textContent = msg;
+    el.classList.remove('hidden');
+}
+
+function hideError() {
+    document.getElementById('error-msg').classList.add('hidden');
+}
+
+document.getElementById('fund-code').addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') analyzeFund();
+});
+
+// 页面加载时显示默认策略简介
+updateStrategyDesc(currentStrategy);
+</script>
+
+</body>
+</html>
