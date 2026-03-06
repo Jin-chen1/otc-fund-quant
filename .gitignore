@@ -22,7 +22,9 @@ results/
 
 # Local databases and caches
 data/*.db
+data/*.sqlite
 web/*.db
+web/*.sqlite
 
 # Archives and ad hoc files
 *.zip
