@@ -1,0 +1,1044 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>定投记录与盈利看板</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-secondary: #111827;
+            --bg-card: #151d2e;
+            --bg-card-soft: rgba(15, 23, 42, 0.72);
+            --border-primary: #1e2d4a;
+            --border-glow: rgba(56, 189, 248, 0.18);
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent-cyan: #38bdf8;
+            --accent-teal: #2dd4bf;
+            --accent-buy: #34d399;
+            --accent-buy-bg: rgba(52, 211, 153, 0.1);
+            --accent-sell: #f87171;
+            --accent-sell-bg: rgba(248, 113, 113, 0.1);
+            --accent-hold: #fbbf24;
+            --accent-hold-bg: rgba(251, 191, 36, 0.1);
+            --accent-purple: #a78bfa;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Noto Sans SC', -apple-system, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(56, 189, 248, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(56, 189, 248, 0.03) 1px, transparent 1px);
+            background-size: 58px 58px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        body::after {
+            content: '';
+            position: fixed;
+            top: -180px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 860px;
+            height: 380px;
+            background: radial-gradient(ellipse, rgba(56, 189, 248, 0.08) 0%, transparent 70%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        .hidden { display: none !important; }
+        .muted { color: var(--text-muted); }
+
+        nav {
+            background: rgba(10, 14, 23, 0.86);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border-primary);
+            position: sticky;
+            top: 0;
+            z-index: 50;
+        }
+
+        .nav-wrap {
+            max-width: 1280px;
+            margin: 0 auto;
+            padding: 14px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+        }
+
+        .nav-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .nav-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .brand-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent-cyan);
+            box-shadow: 0 0 10px var(--accent-cyan);
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .nav-link {
+            padding: 8px 14px;
+            border: 1px solid var(--border-primary);
+            border-radius: 999px;
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+
+        .nav-link:hover {
+            border-color: rgba(56, 189, 248, 0.35);
+            color: var(--text-secondary);
+        }
+
+        .nav-link.active {
+            color: var(--accent-cyan);
+            border-color: rgba(56, 189, 248, 0.38);
+            background: rgba(56, 189, 248, 0.08);
+        }
+
+        .page {
+            max-width: 1280px;
+            margin: 0 auto;
+            padding: 24px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-primary);
+            border-radius: 14px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(135deg, rgba(56, 189, 248, 0.04), transparent 42%);
+            pointer-events: none;
+        }
+
+        .hero {
+            padding: 24px;
+            margin-bottom: 18px;
+            display: grid;
+            grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.7fr);
+            gap: 18px;
+        }
+
+        .hero-note {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .hero-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            width: fit-content;
+            padding: 6px 12px;
+            border-radius: 999px;
+            border: 1px solid rgba(56, 189, 248, 0.2);
+            background: rgba(56, 189, 248, 0.06);
+            color: var(--accent-cyan);
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .hero-side {
+            background: var(--bg-card-soft);
+            border: 1px solid rgba(56, 189, 248, 0.08);
+            border-radius: 12px;
+            padding: 18px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .section {
+            margin-bottom: 18px;
+        }
+
+        .section-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 14px;
+        }
+
+        .section-head h2 {
+            font-size: 15px;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+        }
+
+        .form-card {
+            padding: 22px 24px;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: minmax(160px, 220px) minmax(180px, 220px) minmax(220px, 280px) auto;
+            gap: 14px;
+            align-items: end;
+        }
+
+        .field {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .field label {
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .input-field {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-primary);
+            border-radius: 10px;
+            padding: 12px 16px;
+            color: var(--accent-cyan);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 18px;
+            font-weight: 600;
+            outline: none;
+            transition: all 0.2s;
+            width: 100%;
+        }
+
+        .input-field:focus {
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.1);
+        }
+
+        .btn-primary {
+            height: 48px;
+            padding: 0 26px;
+            background: linear-gradient(135deg, #0ea5e9, #06b6d4);
+            color: #fff;
+            border: none;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 20px rgba(14, 165, 233, 0.28);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.55;
+            pointer-events: none;
+        }
+
+        .helper-text {
+            margin-top: 14px;
+            color: var(--text-secondary);
+            font-size: 12px;
+            line-height: 1.8;
+        }
+
+        .message {
+            padding: 12px 16px;
+            border-radius: 10px;
+            font-size: 13px;
+            margin-top: 14px;
+        }
+
+        .message-error {
+            background: rgba(248, 113, 113, 0.08);
+            border: 1px solid rgba(248, 113, 113, 0.25);
+            color: var(--accent-sell);
+        }
+
+        .message-success {
+            background: rgba(52, 211, 153, 0.08);
+            border: 1px solid rgba(52, 211, 153, 0.25);
+            color: var(--accent-buy);
+        }
+
+        .stats-card,
+        .records-card {
+            padding: 22px 24px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+        }
+
+        .stat-card {
+            background: var(--bg-card-soft);
+            border: 1px solid rgba(56, 189, 248, 0.08);
+            border-radius: 12px;
+            padding: 16px;
+            min-height: 112px;
+        }
+
+        .stat-card .label {
+            color: var(--text-muted);
+            font-size: 11px;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        .stat-card .value {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .stat-card .sub {
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .fund-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 14px;
+        }
+
+        .fund-card {
+            padding: 20px;
+            border-radius: 14px;
+            background: linear-gradient(180deg, rgba(21, 29, 46, 0.96), rgba(13, 19, 32, 0.96));
+            border: 1px solid var(--border-primary);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .fund-card.positive {
+            border-color: rgba(52, 211, 153, 0.22);
+        }
+
+        .fund-card.negative {
+            border-color: rgba(248, 113, 113, 0.22);
+        }
+
+        .fund-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .fund-title {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .fund-title strong {
+            font-size: 24px;
+            color: var(--accent-cyan);
+        }
+
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        .status-confirmed {
+            color: var(--accent-buy);
+            background: var(--accent-buy-bg);
+            border: 1px solid rgba(52, 211, 153, 0.24);
+        }
+
+        .status-pending {
+            color: var(--accent-hold);
+            background: var(--accent-hold-bg);
+            border: 1px solid rgba(251, 191, 36, 0.24);
+        }
+
+        .profit-panel {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 14px 16px;
+            border-radius: 12px;
+            background: rgba(15, 23, 42, 0.7);
+            border: 1px solid rgba(56, 189, 248, 0.08);
+            margin-bottom: 16px;
+        }
+
+        .profit-panel .value {
+            font-size: 28px;
+            font-weight: 700;
+        }
+
+        .positive-text { color: var(--accent-buy); }
+        .negative-text { color: var(--accent-sell); }
+        .neutral-text { color: var(--text-secondary); }
+
+        .fund-metrics {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .metric-box {
+            background: rgba(10, 14, 23, 0.56);
+            border: 1px solid rgba(56, 189, 248, 0.06);
+            border-radius: 12px;
+            padding: 12px 14px;
+        }
+
+        .metric-box .label {
+            display: block;
+            color: var(--text-muted);
+            font-size: 11px;
+            margin-bottom: 6px;
+        }
+
+        .metric-box .value {
+            color: var(--text-primary);
+            font-size: 15px;
+            font-weight: 600;
+        }
+
+        .empty-state {
+            padding: 24px;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 13px;
+            border: 1px dashed rgba(56, 189, 248, 0.16);
+            border-radius: 12px;
+            background: rgba(15, 23, 42, 0.5);
+        }
+
+        .table-wrap {
+            overflow-x: auto;
+        }
+
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        .data-table thead th {
+            padding: 10px 12px;
+            text-align: left;
+            color: var(--text-muted);
+            font-weight: 500;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            border-bottom: 1px solid var(--border-primary);
+            white-space: nowrap;
+        }
+
+        .data-table tbody tr {
+            border-bottom: 1px solid rgba(30, 45, 74, 0.5);
+        }
+
+        .data-table tbody tr:hover {
+            background: rgba(56, 189, 248, 0.03);
+        }
+
+        .data-table td {
+            padding: 12px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+
+        .delete-btn {
+            padding: 7px 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(248, 113, 113, 0.24);
+            background: rgba(248, 113, 113, 0.08);
+            color: var(--accent-sell);
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+
+        .delete-btn:hover {
+            background: rgba(248, 113, 113, 0.14);
+        }
+
+        .delete-btn:disabled {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg-primary); }
+        ::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 3px; }
+
+        @media (max-width: 980px) {
+            .hero {
+                grid-template-columns: 1fr;
+            }
+
+            .form-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 720px) {
+            .page,
+            .nav-wrap {
+                padding-left: 16px;
+                padding-right: 16px;
+            }
+
+            .stats-grid,
+            .fund-grid,
+            .fund-metrics {
+                grid-template-columns: 1fr;
+            }
+
+            .profit-panel {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+        }
+    </style>
+</head>
+<body>
+
+<nav>
+    <div class="nav-wrap">
+        <div class="nav-left">
+            <div class="nav-brand">
+                <span class="brand-dot"></span>
+                <div>
+                    <div style="font-size: 17px; font-weight: 700; letter-spacing: 0.4px;">基金分析终端</div>
+                    <div class="mono muted" style="font-size: 11px; margin-top: 2px;">DCA TRACKER</div>
+                </div>
+            </div>
+            <div class="nav-links">
+                <a class="nav-link" href="/">分析终端</a>
+                <a class="nav-link active" href="/dca">定投看板</a>
+            </div>
+        </div>
+        <div id="as-of-date" class="mono muted" style="font-size: 12px;">净值截至 --</div>
+    </div>
+</nav>
+
+<div class="page">
+    <section class="card hero">
+        <div class="hero-note">
+            <span class="hero-chip">手动定投录入</span>
+            <h1 style="font-size: 30px; line-height: 1.2;">录入或补录买入金额，系统按下一可用净值确认份额，并持续计算当前盈利百分比。</h1>
+            <p style="color: var(--text-secondary); font-size: 14px; line-height: 1.9; max-width: 760px;">
+                页面汇总口径按基金聚合。周末或节假日录入会自动顺延到下一有净值日确认，未确认金额会单独列出，不提前计入收益。
+            </p>
+        </div>
+        <div class="hero-side">
+            <div class="muted" style="font-size: 12px;">确认规则</div>
+            <div style="font-size: 18px; font-weight: 700;">trade_date 之后首个净值日</div>
+            <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.8;">
+                买入日期默认今天，也可以手动补录历史日期。份额确认后，当前价值按该基金最新可用净值滚动更新。
+            </div>
+        </div>
+    </section>
+
+    <section class="section">
+        <div class="card form-card">
+            <div class="section-head" style="margin-bottom: 18px;">
+                <h2>录入定投</h2>
+                <span class="muted" style="font-size: 12px;">新增后自动刷新看板</span>
+            </div>
+            <div class="form-grid">
+                <div class="field">
+                    <label for="dca-fund-code">基金代码</label>
+                    <input id="dca-fund-code" class="input-field mono" type="text" maxlength="6" inputmode="numeric" placeholder="如 007343">
+                </div>
+                <div class="field">
+                    <label for="dca-trade-date">买入日期</label>
+                    <input id="dca-trade-date" class="input-field mono" type="date">
+                </div>
+                <div class="field">
+                    <label for="dca-amount">买入金额</label>
+                    <input id="dca-amount" class="input-field mono" type="number" min="0.01" step="0.01" placeholder="如 500.00">
+                </div>
+                <button id="submit-btn" class="btn-primary" onclick="submitRecord()">新增记录</button>
+            </div>
+            <div class="helper-text">
+                买入日期默认今天，可手动选择历史日期；未来日期不可录入。系统不会要求你手工输入净值，待确认记录会在下一次刷新时尝试自动确认。
+            </div>
+            <div id="message-box" class="message hidden"></div>
+        </div>
+    </section>
+
+    <section class="section">
+        <div class="card stats-card">
+            <div class="section-head">
+                <h2>账户总览</h2>
+                <span class="muted" style="font-size: 12px;">按所有基金汇总</span>
+            </div>
+            <div id="stats-grid" class="stats-grid"></div>
+        </div>
+    </section>
+
+    <section class="section">
+        <div class="section-head">
+            <h2>基金汇总</h2>
+            <span id="fund-count-hint" class="muted" style="font-size: 12px;">0 只基金</span>
+        </div>
+        <div id="fund-empty" class="empty-state hidden">暂无定投记录。新增一笔买入后，这里会按基金显示累计本金、份额和当前盈利百分比。</div>
+        <div id="fund-grid" class="fund-grid"></div>
+    </section>
+
+    <section class="section">
+        <div class="card records-card">
+            <div class="section-head">
+                <h2>明细记录</h2>
+                <span class="muted" style="font-size: 12px;">最新录入排在最前</span>
+            </div>
+            <div id="records-empty" class="empty-state hidden">暂无明细记录。</div>
+            <div class="table-wrap">
+                <table id="records-table" class="data-table hidden">
+                    <thead>
+                        <tr>
+                            <th>买入日</th>
+                            <th>基金代码</th>
+                            <th>金额</th>
+                            <th>状态</th>
+                            <th>确认净值日</th>
+                            <th>确认净值</th>
+                            <th>份额</th>
+                            <th>创建时间</th>
+                            <th>删除</th>
+                        </tr>
+                    </thead>
+                    <tbody id="records-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+</div>
+
+<script>
+let deletingRecordId = null;
+let lastSnapshot = { records: [] };
+let isSubmitting = false;
+
+function localTodayString() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function initTradeDateInput() {
+    const input = document.getElementById('dca-trade-date');
+    const today = localTodayString();
+    input.max = today;
+    if (!input.value) {
+        input.value = today;
+    }
+}
+
+function fmtMoney(value) {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) return '--';
+    return '¥' + Number(value).toLocaleString('zh-CN', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    });
+}
+
+function fmtPct(value) {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) return '--';
+    const num = Number(value);
+    const sign = num > 0 ? '+' : '';
+    return sign + num.toFixed(2) + '%';
+}
+
+function fmtNav(value) {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) return '--';
+    return Number(value).toFixed(4);
+}
+
+function fmtShares(value) {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) return '--';
+    return Number(value).toLocaleString('zh-CN', {
+        minimumFractionDigits: 4,
+        maximumFractionDigits: 4,
+    });
+}
+
+function profitClass(value) {
+    if (value === null || value === undefined || Number.isNaN(Number(value)) || Number(value) === 0) return 'neutral-text';
+    return Number(value) > 0 ? 'positive-text' : 'negative-text';
+}
+
+function setMessage(text, type = 'error') {
+    const box = document.getElementById('message-box');
+    box.textContent = text;
+    box.className = 'message ' + (type === 'success' ? 'message-success' : 'message-error');
+}
+
+function clearMessage() {
+    const box = document.getElementById('message-box');
+    box.textContent = '';
+    box.className = 'message hidden';
+}
+
+function setSubmitLoading(loading) {
+    const button = document.getElementById('submit-btn');
+    button.disabled = loading;
+    button.textContent = loading ? '提交中...' : '新增记录';
+}
+
+function statusBadge(status, pendingCount = 0) {
+    if (status === 'confirmed') {
+        return '<span class="status-pill status-confirmed">已确认</span>';
+    }
+    const suffix = pendingCount > 0 ? ' ' + pendingCount + ' 笔' : '';
+    return '<span class="status-pill status-pending">待确认' + suffix + '</span>';
+}
+
+function renderStats(portfolio) {
+    const grid = document.getElementById('stats-grid');
+    const profitTone = profitClass(portfolio.total_profit_amount);
+
+    const items = [
+        {
+            label: '跟踪基金',
+            value: String(portfolio.tracked_fund_count || 0),
+            sub: '当前已录入的基金数量'
+        },
+        {
+            label: '已确认本金',
+            value: fmtMoney(portfolio.total_confirmed_amount),
+            sub: '已用净值确认份额'
+        },
+        {
+            label: '待确认金额',
+            value: fmtMoney(portfolio.total_pending_amount),
+            sub: '暂不计入盈利'
+        },
+        {
+            label: '当前市值',
+            value: fmtMoney(portfolio.total_value),
+            sub: '按最新可用净值估算'
+        },
+        {
+            label: '累计浮盈',
+            value: fmtMoney(portfolio.total_profit_amount),
+            sub: '当前市值 - 已确认本金',
+            extraClass: profitTone
+        },
+        {
+            label: '收益率',
+            value: fmtPct(portfolio.total_profit_pct),
+            sub: '仅基于已确认本金',
+            extraClass: profitTone
+        }
+    ];
+
+    grid.innerHTML = items.map(item => `
+        <div class="stat-card">
+            <div class="label">${item.label}</div>
+            <div class="value mono ${item.extraClass || ''}">${item.value}</div>
+            <div class="sub">${item.sub}</div>
+        </div>
+    `).join('');
+}
+
+function renderFunds(funds) {
+    const container = document.getElementById('fund-grid');
+    const empty = document.getElementById('fund-empty');
+    document.getElementById('fund-count-hint').textContent = (funds?.length || 0) + ' 只基金';
+
+    if (!funds || funds.length === 0) {
+        empty.classList.remove('hidden');
+        container.innerHTML = '';
+        return;
+    }
+
+    empty.classList.add('hidden');
+    container.innerHTML = funds.map(fund => {
+        const tone = fund.profit_amount > 0 ? 'positive' : fund.profit_amount < 0 ? 'negative' : '';
+        const profitTone = profitClass(fund.profit_amount);
+        const navText = fund.latest_nav_date
+            ? `${fund.latest_nav_date} / ${fmtNav(fund.latest_nav)}`
+            : '暂无净值';
+        const stateBadge = fund.pending_count > 0
+            ? statusBadge('pending', fund.pending_count)
+            : statusBadge('confirmed');
+
+        return `
+            <div class="fund-card ${tone}">
+                <div class="fund-head">
+                    <div class="fund-title">
+                        <strong class="mono">${fund.fund_code}</strong>
+                        <div class="muted" style="font-size: 12px;">定投起始 ${fund.start_date}</div>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 8px; align-items: flex-end;">
+                        ${stateBadge}
+                        <div class="mono muted" style="font-size: 11px;">${navText}</div>
+                    </div>
+                </div>
+                <div class="profit-panel">
+                    <div>
+                        <div class="muted" style="font-size: 12px; margin-bottom: 6px;">当前盈利百分比</div>
+                        <div class="value mono ${profitTone}">${fmtPct(fund.profit_pct)}</div>
+                    </div>
+                    <div style="text-align: right;">
+                        <div class="muted" style="font-size: 12px; margin-bottom: 6px;">累计浮盈金额</div>
+                        <div class="mono ${profitTone}" style="font-size: 18px; font-weight: 700;">${fmtMoney(fund.profit_amount)}</div>
+                    </div>
+                </div>
+                <div class="fund-metrics">
+                    <div class="metric-box">
+                        <span class="label">已确认本金</span>
+                        <span class="value mono">${fmtMoney(fund.confirmed_amount)}</span>
+                    </div>
+                    <div class="metric-box">
+                        <span class="label">待确认金额</span>
+                        <span class="value mono">${fmtMoney(fund.pending_amount)}</span>
+                    </div>
+                    <div class="metric-box">
+                        <span class="label">累计份额</span>
+                        <span class="value mono">${fmtShares(fund.total_shares)}</span>
+                    </div>
+                    <div class="metric-box">
+                        <span class="label">当前市值</span>
+                        <span class="value mono">${fmtMoney(fund.current_value)}</span>
+                    </div>
+                    <div class="metric-box">
+                        <span class="label">最新净值</span>
+                        <span class="value mono">${fmtNav(fund.latest_nav)}</span>
+                    </div>
+                    <div class="metric-box">
+                        <span class="label">记录数</span>
+                        <span class="value mono">${fund.record_count}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderRecords(records) {
+    const table = document.getElementById('records-table');
+    const body = document.getElementById('records-body');
+    const empty = document.getElementById('records-empty');
+
+    if (!records || records.length === 0) {
+        table.classList.add('hidden');
+        empty.classList.remove('hidden');
+        body.innerHTML = '';
+        return;
+    }
+
+    empty.classList.add('hidden');
+    table.classList.remove('hidden');
+    body.innerHTML = records.map(record => `
+        <tr>
+            <td class="mono">${record.trade_date}</td>
+            <td class="mono" style="color: var(--accent-cyan); font-weight: 700;">${record.fund_code}</td>
+            <td class="mono">${fmtMoney(record.amount)}</td>
+            <td>${statusBadge(record.status)}</td>
+            <td class="mono">${record.confirm_nav_date || '--'}</td>
+            <td class="mono">${fmtNav(record.confirm_nav)}</td>
+            <td class="mono">${fmtShares(record.shares)}</td>
+            <td class="mono">${record.created_at || '--'}</td>
+            <td>
+                <button class="delete-btn" onclick="deleteRecord(${record.id})" ${deletingRecordId === record.id ? 'disabled' : ''}>
+                    ${deletingRecordId === record.id ? '删除中...' : '删除'}
+                </button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function renderAll(data) {
+    lastSnapshot = data || { records: [] };
+    document.getElementById('as-of-date').textContent = data.as_of_date
+        ? '净值截至 ' + data.as_of_date
+        : '净值截至 --';
+    renderStats(data.portfolio || {});
+    renderFunds(data.funds || []);
+    renderRecords(data.records || []);
+}
+
+async function loadPortfolio() {
+    try {
+        const resp = await fetch('/api/dca/portfolio');
+        const data = await resp.json();
+        if (!resp.ok) {
+            setMessage(data.error || '读取定投看板失败');
+            return;
+        }
+        renderAll(data);
+    } catch (e) {
+        setMessage('网络错误: ' + e.message);
+    }
+}
+
+async function submitRecord() {
+    if (isSubmitting) {
+        return;
+    }
+
+    const fundCodeInput = document.getElementById('dca-fund-code');
+    const tradeDateInput = document.getElementById('dca-trade-date');
+    const amountInput = document.getElementById('dca-amount');
+    const fundCode = fundCodeInput.value.trim();
+    const tradeDate = tradeDateInput.value;
+    const amount = Number(amountInput.value);
+    const today = localTodayString();
+
+    if (!/^\d{6}$/.test(fundCode)) {
+        setMessage('请输入 6 位基金代码');
+        return;
+    }
+    if (!tradeDate) {
+        setMessage('请选择买入日期');
+        return;
+    }
+    if (tradeDate > today) {
+        setMessage('买入日期不能晚于今天');
+        return;
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+        setMessage('请输入大于 0 的买入金额');
+        return;
+    }
+
+    clearMessage();
+    isSubmitting = true;
+    setSubmitLoading(true);
+
+    try {
+        const resp = await fetch('/api/dca/records', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                fund_code: fundCode,
+                trade_date: tradeDate,
+                amount: amount,
+            }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            setMessage(data.error || '新增记录失败');
+            return;
+        }
+
+        amountInput.value = '';
+        tradeDateInput.value = today;
+        setMessage('记录已保存，正在刷新看板。', 'success');
+        await loadPortfolio();
+    } catch (e) {
+        setMessage('网络错误: ' + e.message);
+    } finally {
+        isSubmitting = false;
+        setSubmitLoading(false);
+    }
+}
+
+async function deleteRecord(recordId) {
+    if (!window.confirm('确认删除这条定投记录吗？')) {
+        return;
+    }
+
+    deletingRecordId = recordId;
+    renderRecords(lastSnapshot.records || []);
+
+    try {
+        const resp = await fetch('/api/dca/records/' + recordId, { method: 'DELETE' });
+        const data = await resp.json();
+        if (!resp.ok) {
+            setMessage(data.error || '删除失败');
+            return;
+        }
+
+        setMessage('记录已删除，正在刷新看板。', 'success');
+        await loadPortfolio();
+    } catch (e) {
+        setMessage('网络错误: ' + e.message);
+    } finally {
+        deletingRecordId = null;
+        renderRecords(lastSnapshot.records || []);
+    }
+}
+
+document.getElementById('dca-fund-code').addEventListener('input', (event) => {
+    event.target.value = event.target.value.replace(/\D/g, '').slice(0, 6);
+});
+
+document.getElementById('dca-fund-code').addEventListener('keypress', (event) => {
+    if (event.key === 'Enter') submitRecord();
+});
+
+document.getElementById('dca-trade-date').addEventListener('keypress', (event) => {
+    if (event.key === 'Enter') submitRecord();
+});
+
+document.getElementById('dca-amount').addEventListener('keypress', (event) => {
+    if (event.key === 'Enter') submitRecord();
+});
+
+initTradeDateInput();
+loadPortfolio();
+</script>
+
+</body>
+</html>

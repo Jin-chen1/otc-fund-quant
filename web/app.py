@@ -6,6 +6,8 @@ import sys
 import os
 import sqlite3
 import json
+import math
+import re
 from datetime import datetime, date
 from typing import Dict
 
@@ -34,10 +36,17 @@ from otc_fund_quant.config.loader import load_strategy_params
 app = Flask(__name__)
 
 # 全局数据加载器
-loader = DataLoader()
+loader = DataLoader(db_path=os.environ.get("OTC_FUND_QUANT_NAV_DB_PATH"))
 
 # 推荐记录数据库路径
-REC_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recommendations.db")
+REC_DB_PATH = os.environ.get(
+    "OTC_FUND_QUANT_REC_DB_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "recommendations.db")
+)
+
+DCA_STATUS_PENDING = "pending"
+DCA_STATUS_CONFIRMED = "confirmed"
+FUND_CODE_PATTERN = re.compile(r"^\d{6}$")
 
 
 # ===== 数据库初始化 =====
@@ -99,6 +108,28 @@ def _init_rec_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(fund_code, strategy, end_date)
         )
+    """)
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS dca_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fund_code TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            amount REAL NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('{DCA_STATUS_PENDING}', '{DCA_STATUS_CONFIRMED}')),
+            confirm_nav_date TEXT,
+            confirm_nav REAL,
+            shares REAL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            confirmed_at TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_dca_records_fund_code
+        ON dca_records (fund_code)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_dca_records_status_trade_date
+        ON dca_records (status, trade_date)
     """)
     conn.commit()
     conn.close()
@@ -169,6 +200,271 @@ def _get_fund_history(fund_code: str) -> pd.DataFrame:
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"]).dt.date
     return df
+
+
+def _validate_dca_payload(data: dict):
+    """校验手动定投录入参数。"""
+    if not isinstance(data, dict):
+        raise ValueError("请求体必须是 JSON 对象")
+
+    fund_code = str(data.get("fund_code", "")).strip()
+    if not fund_code:
+        raise ValueError("请输入基金代码")
+    if not FUND_CODE_PATTERN.fullmatch(fund_code):
+        raise ValueError("基金代码需为6位数字")
+
+    raw_amount = data.get("amount")
+    if isinstance(raw_amount, bool):
+        raise ValueError("买入金额必须为正数")
+    try:
+        amount = float(raw_amount)
+    except (TypeError, ValueError):
+        raise ValueError("买入金额必须为正数")
+
+    if not math.isfinite(amount) or amount <= 0:
+        raise ValueError("买入金额必须为正数")
+
+    raw_trade_date = data.get("trade_date", None)
+    if raw_trade_date is None:
+        trade_date_value = date.today()
+    else:
+        trade_date_str = str(raw_trade_date).strip()
+        if not trade_date_str:
+            raise ValueError("请选择买入日期")
+        try:
+            trade_date_value = datetime.strptime(trade_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError("买入日期格式必须为 YYYY-MM-DD")
+        if trade_date_value > date.today():
+            raise ValueError("买入日期不能晚于今天")
+
+    return fund_code, round(amount, 2), trade_date_value.isoformat()
+
+
+def _sync_dca_records():
+    """同步定投记录对应基金的最新净值，并确认待处理记录。"""
+    conn = sqlite3.connect(REC_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT fund_code FROM dca_records ORDER BY fund_code")
+    fund_codes = [row[0] for row in cursor.fetchall()]
+    cursor.execute("""
+        SELECT id, fund_code, trade_date, amount
+        FROM dca_records
+        WHERE status = ?
+        ORDER BY trade_date, id
+    """, (DCA_STATUS_PENDING,))
+    pending_records = cursor.fetchall()
+    conn.close()
+
+    if not fund_codes:
+        return
+
+    for fund_code in fund_codes:
+        try:
+            loader.update_db(fund_code)
+        except Exception as e:
+            print(f"Warning: failed to sync NAV for {fund_code}: {e}")
+
+    if not pending_records:
+        return
+
+    nav_conn = sqlite3.connect(loader.db_path)
+    rec_conn = sqlite3.connect(REC_DB_PATH)
+    try:
+        nav_cursor = nav_conn.cursor()
+        for record_id, fund_code, trade_date_str, amount in pending_records:
+            nav_cursor.execute("""
+                SELECT date, nav
+                FROM fund_nav
+                WHERE fund_code = ? AND date >= ?
+                ORDER BY date
+                LIMIT 1
+            """, (fund_code, trade_date_str))
+            row = nav_cursor.fetchone()
+            if not row:
+                continue
+
+            confirm_nav_date, confirm_nav = row
+            if confirm_nav is None:
+                continue
+
+            confirm_nav = float(confirm_nav)
+            if confirm_nav <= 0:
+                continue
+
+            shares = float(amount) / confirm_nav
+            rec_conn.execute("""
+                UPDATE dca_records
+                SET status = ?, confirm_nav_date = ?, confirm_nav = ?, shares = ?, confirmed_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (DCA_STATUS_CONFIRMED, confirm_nav_date, confirm_nav, shares, record_id))
+
+        rec_conn.commit()
+    finally:
+        nav_conn.close()
+        rec_conn.close()
+
+
+def _get_latest_nav_snapshot(fund_codes):
+    """读取每只基金最新净值快照。"""
+    if not fund_codes:
+        return {}
+
+    conn = sqlite3.connect(loader.db_path)
+    cursor = conn.cursor()
+    latest_nav_map = {}
+    try:
+        for fund_code in fund_codes:
+            cursor.execute("""
+                SELECT date, nav
+                FROM fund_nav
+                WHERE fund_code = ?
+                ORDER BY date DESC
+                LIMIT 1
+            """, (fund_code,))
+            row = cursor.fetchone()
+            if row:
+                latest_nav_map[fund_code] = {
+                    "latest_nav_date": row[0],
+                    "latest_nav": float(row[1]),
+                }
+    finally:
+        conn.close()
+
+    return latest_nav_map
+
+
+def _empty_dca_snapshot():
+    """返回空的定投看板数据结构。"""
+    return {
+        "as_of_date": date.today().isoformat(),
+        "portfolio": {
+            "tracked_fund_count": 0,
+            "total_confirmed_amount": 0.0,
+            "total_pending_amount": 0.0,
+            "total_value": 0.0,
+            "total_profit_amount": 0.0,
+            "total_profit_pct": None,
+        },
+        "funds": [],
+        "records": [],
+    }
+
+
+def _get_dca_snapshot():
+    """汇总定投记录、基金净值和当前收益。"""
+    _sync_dca_records()
+
+    conn = sqlite3.connect(REC_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("""
+        SELECT id, fund_code, trade_date, amount, status, confirm_nav_date, confirm_nav, shares, created_at
+        FROM dca_records
+        ORDER BY trade_date DESC, id DESC
+    """).fetchall()
+    conn.close()
+
+    if not rows:
+        return _empty_dca_snapshot()
+
+    fund_codes = sorted({row["fund_code"] for row in rows})
+    latest_nav_map = _get_latest_nav_snapshot(fund_codes)
+
+    fund_metrics = {}
+    records = []
+
+    for row in rows:
+        amount = float(row["amount"])
+        confirm_nav = float(row["confirm_nav"]) if row["confirm_nav"] is not None else None
+        shares = float(row["shares"]) if row["shares"] is not None else None
+
+        records.append({
+            "id": row["id"],
+            "trade_date": row["trade_date"],
+            "fund_code": row["fund_code"],
+            "amount": amount,
+            "status": row["status"],
+            "confirm_nav_date": row["confirm_nav_date"],
+            "confirm_nav": confirm_nav,
+            "shares": shares,
+            "created_at": row["created_at"],
+        })
+
+        fund = fund_metrics.setdefault(row["fund_code"], {
+            "fund_code": row["fund_code"],
+            "start_date": row["trade_date"],
+            "confirmed_amount": 0.0,
+            "pending_amount": 0.0,
+            "total_shares": 0.0,
+            "record_count": 0,
+            "pending_count": 0,
+        })
+        fund["start_date"] = min(fund["start_date"], row["trade_date"])
+        fund["record_count"] += 1
+
+        if row["status"] == DCA_STATUS_CONFIRMED:
+            fund["confirmed_amount"] += amount
+            fund["total_shares"] += shares or 0.0
+        else:
+            fund["pending_amount"] += amount
+            fund["pending_count"] += 1
+
+    funds = []
+    latest_dates = []
+    total_confirmed_amount = 0.0
+    total_pending_amount = 0.0
+    total_value = 0.0
+
+    for fund_code, fund in sorted(fund_metrics.items(), key=lambda item: (item[1]["start_date"], item[0])):
+        latest = latest_nav_map.get(fund_code, {})
+        latest_nav = latest.get("latest_nav")
+        latest_nav_date = latest.get("latest_nav_date")
+        if latest_nav_date:
+            latest_dates.append(latest_nav_date)
+
+        current_value = fund["total_shares"] * latest_nav if latest_nav is not None else 0.0
+        confirmed_amount = fund["confirmed_amount"]
+        profit_amount = current_value - confirmed_amount if confirmed_amount > 0 else 0.0
+        profit_pct = (profit_amount / confirmed_amount * 100.0) if confirmed_amount > 0 else None
+
+        funds.append({
+            "fund_code": fund_code,
+            "start_date": fund["start_date"],
+            "latest_nav": latest_nav,
+            "latest_nav_date": latest_nav_date,
+            "confirmed_amount": confirmed_amount,
+            "pending_amount": fund["pending_amount"],
+            "total_shares": fund["total_shares"],
+            "current_value": current_value,
+            "profit_amount": profit_amount,
+            "profit_pct": profit_pct,
+            "record_count": fund["record_count"],
+            "pending_count": fund["pending_count"],
+        })
+
+        total_confirmed_amount += confirmed_amount
+        total_pending_amount += fund["pending_amount"]
+        total_value += current_value
+
+    total_profit_amount = total_value - total_confirmed_amount
+    total_profit_pct = (
+        total_profit_amount / total_confirmed_amount * 100.0
+        if total_confirmed_amount > 0 else None
+    )
+
+    return {
+        "as_of_date": max(latest_dates) if latest_dates else date.today().isoformat(),
+        "portfolio": {
+            "tracked_fund_count": len(funds),
+            "total_confirmed_amount": total_confirmed_amount,
+            "total_pending_amount": total_pending_amount,
+            "total_value": total_value,
+            "total_profit_amount": total_profit_amount,
+            "total_profit_pct": total_profit_pct,
+        },
+        "funds": funds,
+        "records": records,
+    }
 
 
 def _get_latest_signal_date(fund_code: str, strategy: str = "v6") -> str:
@@ -247,6 +543,12 @@ def _auto_save_reviews(fund_code, signal_records, today_rec, latest_nav, latest_
 def index():
     """主页面。"""
     return render_template("index.html")
+
+
+@app.route("/dca")
+def dca_dashboard():
+    """定投记录与收益看板。"""
+    return render_template("dca.html")
 
 
 @app.route("/api/analyze", methods=["POST"])
@@ -352,6 +654,63 @@ def api_analyze():
         import traceback
         traceback.print_exc()
         return jsonify({"error": f"分析失败: {str(e)}"}), 500
+
+
+@app.route("/api/dca/portfolio")
+def api_dca_portfolio():
+    """获取定投看板汇总与明细。"""
+    try:
+        return jsonify(_get_dca_snapshot())
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"读取定投看板失败: {str(e)}"}), 500
+
+
+@app.route("/api/dca/records", methods=["POST"])
+def api_create_dca_record():
+    """新增一条手动定投记录。"""
+    data = request.get_json(silent=True)
+    if data is None:
+        data = {}
+    try:
+        fund_code, amount, trade_date_str = _validate_dca_payload(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    conn = sqlite3.connect(REC_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO dca_records (fund_code, trade_date, amount, status)
+        VALUES (?, ?, ?, ?)
+    """, (fund_code, trade_date_str, amount, DCA_STATUS_PENDING))
+    record_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "id": record_id,
+        "fund_code": fund_code,
+        "trade_date": trade_date_str,
+        "amount": amount,
+        "status": DCA_STATUS_PENDING,
+    }), 201
+
+
+@app.route("/api/dca/records/<int:record_id>", methods=["DELETE"])
+def api_delete_dca_record(record_id: int):
+    """删除误录的手动定投记录。"""
+    conn = sqlite3.connect(REC_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM dca_records WHERE id = ?", (record_id,))
+    conn.commit()
+    deleted = cursor.rowcount
+    conn.close()
+
+    if deleted == 0:
+        return jsonify({"error": "记录不存在"}), 404
+
+    return jsonify({"success": True, "id": record_id})
 
 
 @app.route("/api/recommendations/<fund_code>")

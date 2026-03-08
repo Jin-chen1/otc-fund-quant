@@ -266,12 +266,18 @@
 <!-- 顶部导航 -->
 <nav style="background: rgba(10,14,23,0.85); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border-primary); position: sticky; top: 0; z-index: 50;">
     <div style="max-width: 1280px; margin: 0 auto; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between;">
-        <div style="display: flex; align-items: center; gap: 12px;">
-            <div style="width: 8px; height: 8px; border-radius: 50%; background: var(--accent-cyan); box-shadow: 0 0 8px var(--accent-cyan);"></div>
-            <h1 style="font-size: 17px; font-weight: 700; letter-spacing: 0.5px;">
-                基金分析终端
-            </h1>
-            <span id="nav-strategy-label" class="mono" style="font-size: 12px; color: var(--text-muted); margin-left: 4px;">V6</span>
+        <div style="display: flex; align-items: center; gap: 18px; flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <div style="width: 8px; height: 8px; border-radius: 50%; background: var(--accent-cyan); box-shadow: 0 0 8px var(--accent-cyan);"></div>
+                <h1 style="font-size: 17px; font-weight: 700; letter-spacing: 0.5px;">
+                    基金分析终端
+                </h1>
+                <span id="nav-strategy-label" class="mono" style="font-size: 12px; color: var(--text-muted); margin-left: 4px;">V6</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <a href="/" style="padding: 7px 14px; border-radius: 999px; border: 1px solid var(--accent-cyan); background: rgba(56, 189, 248, 0.08); color: var(--accent-cyan); text-decoration: none; font-size: 12px;">分析终端</a>
+                <a href="/dca" style="padding: 7px 14px; border-radius: 999px; border: 1px solid var(--border-primary); color: var(--text-muted); text-decoration: none; font-size: 12px;">定投看板</a>
+            </div>
         </div>
         <div class="mono" style="font-size: 12px; color: var(--text-muted);" id="update-time"></div>
     </div>
