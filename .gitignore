@@ -23,6 +23,7 @@ results/
 # Local databases and caches
 data/*.db
 data/*.sqlite
+data/nav_estimator_cache/
 web/*.db
 web/*.sqlite
 

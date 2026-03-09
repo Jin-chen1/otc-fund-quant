@@ -1,0 +1,64 @@
+"""基金分类器。"""
+
+from typing import Literal
+
+from loguru import logger
+
+from ..data.fetcher.fund_fetcher import FundFetcher
+
+
+FundType = Literal["index_a", "index_hk", "active_a", "active_hk", "bond_pure", "bond_plus", "qdii"]
+
+
+class FundClassifier:
+    """基金类型分类器。"""
+
+    def __init__(self):
+        self.fund_fetcher = FundFetcher()
+
+    def classify(self, fund_code: str, fund_info: dict | None = None) -> FundType:
+        logger.info(f"开始分类基金: {fund_code}")
+
+        if fund_info is None:
+            fund_info = self.fund_fetcher.get_fund_info(fund_code)
+
+        fund_name = str(fund_info.get("name", "")).strip()
+        fund_type_str = str(fund_info.get("type", "")).strip()
+        logger.debug(f"基金名称: {fund_name}, 类型: {fund_type_str}")
+
+        fund_name_lower = fund_name.lower()
+        fund_type_lower = fund_type_str.lower()
+
+        hk_keywords = ["港股", "恒生", "香港", "hk", "hsi", "港股通"]
+        qdii_keywords = ["qdii", "纳斯达克", "标普", "道琼斯", "海外", "全球"]
+
+        if "qdii" in fund_type_lower or any(kw in fund_name_lower for kw in qdii_keywords):
+            return "qdii"
+
+        if (
+            "指数" in fund_name
+            or "指数" in fund_type_str
+            or "etf" in fund_name_lower
+            or "联接" in fund_name
+            or "指数增强" in fund_name
+        ):
+            if any(kw in fund_name_lower for kw in hk_keywords) or "港股" in fund_type_str:
+                return "index_hk"
+            return "index_a"
+
+        if "债" in fund_name or "债券" in fund_type_str:
+            if any(kw in fund_name for kw in ["固收+", "二级债", "偏债", "混合债"]):
+                return "bond_plus"
+            if any(kw in fund_name for kw in ["纯债", "短债", "中短债", "信用债", "利率债"]):
+                return "bond_pure"
+            if "债券型" in fund_type_str:
+                return "bond_pure"
+            return "bond_plus"
+
+        if any(kw in fund_name_lower for kw in hk_keywords):
+            return "active_hk"
+
+        return "active_a"
+
+    def get_estimator_params(self, fund_code: str, fund_type: FundType) -> dict:
+        return {"fund_code": fund_code, "fund_type": fund_type}

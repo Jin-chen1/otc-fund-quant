@@ -32,6 +32,7 @@ from otc_fund_quant.analysis.signals import (
 from otc_fund_quant.analysis.backtest import calc_period_returns
 from otc_fund_quant.analysis.chart import get_chart_data
 from otc_fund_quant.config.loader import load_strategy_params
+from otc_fund_quant.nav_estimator import NAVEngine
 
 app = Flask(__name__)
 
@@ -47,6 +48,17 @@ REC_DB_PATH = os.environ.get(
 DCA_STATUS_PENDING = "pending"
 DCA_STATUS_CONFIRMED = "confirmed"
 FUND_CODE_PATTERN = re.compile(r"^\d{6}$")
+NAV_ESTIMATOR_SUMMARY_KEYS = {
+    "fund_code",
+    "status",
+    "fund_type",
+    "estimated_nav",
+    "estimated_return",
+    "nav_date",
+    "target_date",
+    "confidence_score",
+    "warnings",
+}
 
 
 # ===== 数据库初始化 =====
@@ -537,6 +549,161 @@ def _auto_save_reviews(fund_code, signal_records, today_rec, latest_nav, latest_
         conn.close()
 
 
+def _normalize_nav_estimator_codes(raw_codes) -> list[str]:
+    """规范化净值估算请求中的基金代码。"""
+    if isinstance(raw_codes, str):
+        candidates = re.split(r"[\s,，;；]+", raw_codes.strip())
+    elif isinstance(raw_codes, (list, tuple, set)):
+        candidates = [str(item).strip() for item in raw_codes]
+    else:
+        raise ValueError("fund_codes 必须是字符串或数组")
+
+    normalized_codes = []
+    seen = set()
+    for code in candidates:
+        if not code:
+            continue
+        if not FUND_CODE_PATTERN.fullmatch(code):
+            raise ValueError(f"基金代码格式非法: {code}")
+        if code in seen:
+            continue
+        seen.add(code)
+        normalized_codes.append(code)
+
+    if not normalized_codes:
+        raise ValueError("请至少提供一个6位基金代码")
+    return normalized_codes
+
+
+def _parse_nav_estimator_strict(raw_value) -> bool:
+    """解析严格模式字段。"""
+    if raw_value is None:
+        return True
+    if isinstance(raw_value, bool):
+        return raw_value
+    if isinstance(raw_value, str):
+        normalized = raw_value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    raise ValueError("strict 必须是布尔值")
+
+
+def _validate_nav_estimator_payload(data: dict) -> tuple[list[str], bool]:
+    """校验净值估算请求体。"""
+    if not isinstance(data, dict):
+        raise ValueError("请求体必须是 JSON 对象")
+
+    fund_codes = _normalize_nav_estimator_codes(data.get("fund_codes"))
+    strict = _parse_nav_estimator_strict(data.get("strict"))
+    return fund_codes, strict
+
+
+def _to_json_safe(value):
+    """将 DataFrame 结果递归转换为可 JSON 序列化的结构。"""
+    if isinstance(value, dict):
+        return {str(key): _to_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_json_safe(item) for item in value]
+    if isinstance(value, pd.DataFrame):
+        return [_to_json_safe(item) for item in value.to_dict(orient="records")]
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    if hasattr(value, "item") and callable(getattr(value, "item")):
+        try:
+            return _to_json_safe(value.item())
+        except (ValueError, TypeError):
+            pass
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _build_nav_estimator_response(results_df: pd.DataFrame, strict: bool) -> dict:
+    """将估值 DataFrame 转换为 API 响应。"""
+    if results_df is None or results_df.empty:
+        return {
+            "summary": {
+                "requested": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "strict_mode": strict,
+            },
+            "results": [],
+        }
+
+    records = [_to_json_safe(item) for item in results_df.to_dict(orient="records")]
+    results = []
+    succeeded = 0
+    failed = 0
+    for record in records:
+        status = record.get("status")
+        warnings = record.get("warnings") or []
+        if status == "失败":
+            failed += 1
+        else:
+            succeeded += 1
+
+        summary = {key: record.get(key) for key in NAV_ESTIMATOR_SUMMARY_KEYS}
+        summary["warnings"] = warnings
+        summary["details"] = {
+            key: value
+            for key, value in record.items()
+            if key not in NAV_ESTIMATOR_SUMMARY_KEYS
+        }
+        results.append(summary)
+
+    return {
+        "summary": {
+            "requested": len(records),
+            "succeeded": succeeded,
+            "failed": failed,
+            "strict_mode": strict,
+        },
+        "results": results,
+    }
+
+
+def _estimate_navs(fund_codes: list[str], strict: bool) -> dict:
+    """执行净值估算并格式化响应。"""
+    engine = NAVEngine(strict=strict)
+    results_df = engine.run(fund_codes, strict=strict)
+    return _build_nav_estimator_response(results_df, strict)
+
+
+def _friendly_nav_estimator_error_message(error: Exception) -> str:
+    """将底层异常映射为更可操作的 API 错误提示。"""
+    message = str(error)
+    proxy_signatures = [
+        "ProxyError",
+        "Unable to connect to proxy",
+        "Cannot connect to proxy",
+    ]
+    if any(signature in message for signature in proxy_signatures):
+        return (
+            f"净值估算失败: {message}。检测到代理连接失败，请检查系统代理配置，"
+            "或设置环境变量 OTC_FUND_QUANT_PROXY_MODE=direct 后重试。"
+        )
+
+    if "质量门槛未通过" in message:
+        return f"净值估算失败: {message}"
+
+    if "资产配置数据" in message or "股票仓位失败" in message or "股票总仓位失败" in message:
+        return f"净值估算失败: {message}。若该基金为主动权益或主动QDII基金，可关闭严格模式后重试。"
+
+    return f"净值估算失败: {message}"
+
+
 # ===== 路由 =====
 
 @app.route("/")
@@ -549,6 +716,12 @@ def index():
 def dca_dashboard():
     """定投记录与收益看板。"""
     return render_template("dca.html")
+
+
+@app.route("/nav-estimator")
+def nav_estimator_dashboard():
+    """基金实时净值估算页面。"""
+    return render_template("nav_estimator.html")
 
 
 @app.route("/api/analyze", methods=["POST"])
@@ -654,6 +827,26 @@ def api_analyze():
         import traceback
         traceback.print_exc()
         return jsonify({"error": f"分析失败: {str(e)}"}), 500
+
+
+@app.route("/api/nav-estimator/estimate", methods=["POST"])
+def api_nav_estimator_estimate():
+    """执行基金实时净值估算。"""
+    data = request.get_json(silent=True)
+    if data is None:
+        data = {}
+
+    try:
+        fund_codes, strict = _validate_nav_estimator_payload(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    try:
+        return jsonify(_estimate_navs(fund_codes, strict))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": _friendly_nav_estimator_error_message(e)}), 500
 
 
 @app.route("/api/dca/portfolio")

@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>基金实时净值估算</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-secondary: #111827;
+            --bg-card: #151d2e;
+            --border-primary: #1e2d4a;
+            --border-glow: rgba(56, 189, 248, 0.22);
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent-cyan: #38bdf8;
+            --accent-teal: #2dd4bf;
+            --accent-buy: #34d399;
+            --accent-sell: #f87171;
+            --accent-warn: #fbbf24;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Noto Sans SC', -apple-system, sans-serif;
+            min-height: 100vh;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+        }
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(56, 189, 248, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(56, 189, 248, 0.03) 1px, transparent 1px);
+            background-size: 60px 60px;
+            pointer-events: none;
+        }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        .hidden { display: none !important; }
+
+        nav {
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            background: rgba(10, 14, 23, 0.86);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border-primary);
+        }
+        .nav-wrap {
+            max-width: 1320px;
+            margin: 0 auto;
+            padding: 14px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+        }
+        .nav-left {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+            flex-wrap: wrap;
+        }
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .nav-link {
+            padding: 7px 14px;
+            border-radius: 999px;
+            border: 1px solid var(--border-primary);
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 12px;
+        }
+        .nav-link.active {
+            border-color: var(--accent-cyan);
+            background: rgba(56, 189, 248, 0.08);
+            color: var(--accent-cyan);
+        }
+
+        main {
+            max-width: 1320px;
+            margin: 0 auto;
+            padding: 24px;
+            position: relative;
+            z-index: 1;
+        }
+        .grid {
+            display: grid;
+            gap: 18px;
+        }
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-primary);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.18);
+        }
+        .card:hover {
+            border-color: var(--border-glow);
+        }
+        .title {
+            font-size: 20px;
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+        .subtitle {
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.7;
+        }
+        .input-area {
+            display: grid;
+            grid-template-columns: 1.2fr 320px;
+            gap: 18px;
+        }
+        textarea {
+            width: 100%;
+            min-height: 150px;
+            resize: vertical;
+            padding: 14px 16px;
+            border-radius: 12px;
+            border: 1px solid var(--border-primary);
+            background: var(--bg-secondary);
+            color: var(--accent-cyan);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+            line-height: 1.7;
+            outline: none;
+        }
+        textarea:focus {
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.1);
+        }
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+        .toggle {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 14px;
+            border-radius: 12px;
+            border: 1px solid var(--border-primary);
+            background: rgba(17, 24, 39, 0.65);
+        }
+        .toggle input { width: 18px; height: 18px; accent-color: var(--accent-cyan); }
+        .btn {
+            padding: 12px 18px;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            background: linear-gradient(135deg, #0ea5e9, #06b6d4);
+            color: white;
+            font-size: 14px;
+            font-weight: 700;
+        }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 14px;
+        }
+        .summary-item {
+            border: 1px solid var(--border-primary);
+            border-radius: 12px;
+            padding: 16px;
+            background: rgba(17, 24, 39, 0.68);
+        }
+        .summary-item .label {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+        .summary-item .value {
+            font-size: 24px;
+            font-weight: 700;
+        }
+        .layout {
+            display: grid;
+            grid-template-columns: 1.2fr 0.8fr;
+            gap: 18px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        th, td {
+            padding: 12px 10px;
+            border-bottom: 1px solid rgba(30, 45, 74, 0.5);
+            text-align: left;
+            vertical-align: top;
+        }
+        th {
+            font-size: 11px;
+            color: var(--text-muted);
+            letter-spacing: 0.7px;
+            text-transform: uppercase;
+        }
+        tbody tr {
+            cursor: pointer;
+        }
+        tbody tr:hover {
+            background: rgba(56, 189, 248, 0.05);
+        }
+        tbody tr.active {
+            background: rgba(45, 212, 191, 0.08);
+        }
+        .status-ok { color: var(--accent-buy); font-weight: 700; }
+        .status-fail { color: var(--accent-sell); font-weight: 700; }
+        .warn-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 24px;
+            padding: 2px 8px;
+            border-radius: 999px;
+            background: rgba(251, 191, 36, 0.12);
+            color: var(--accent-warn);
+        }
+        .detail-grid {
+            display: grid;
+            gap: 12px;
+        }
+        .detail-box {
+            border: 1px solid var(--border-primary);
+            border-radius: 12px;
+            padding: 14px;
+            background: rgba(17, 24, 39, 0.68);
+        }
+        .detail-box h3 {
+            font-size: 13px;
+            margin-bottom: 10px;
+            color: var(--accent-cyan);
+        }
+        .detail-list {
+            display: grid;
+            gap: 8px;
+            font-size: 13px;
+        }
+        .detail-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            border-bottom: 1px dashed rgba(30, 45, 74, 0.5);
+            padding-bottom: 8px;
+        }
+        .detail-row:last-child { border-bottom: none; padding-bottom: 0; }
+        .detail-row span:first-child { color: var(--text-muted); }
+        .warning-list {
+            display: grid;
+            gap: 8px;
+            font-size: 13px;
+        }
+        .warning-item {
+            padding: 10px 12px;
+            border-radius: 10px;
+            background: rgba(251, 191, 36, 0.08);
+            color: #fcd34d;
+            line-height: 1.6;
+        }
+        pre {
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-size: 12px;
+            line-height: 1.6;
+            color: var(--text-secondary);
+        }
+        .table-shell {
+            max-height: 620px;
+            overflow: auto;
+        }
+        .empty {
+            color: var(--text-muted);
+            font-size: 13px;
+            padding: 14px 0;
+        }
+        .error {
+            padding: 12px 16px;
+            border-radius: 12px;
+            background: rgba(248, 113, 113, 0.12);
+            border: 1px solid rgba(248, 113, 113, 0.28);
+            color: var(--accent-sell);
+            font-size: 13px;
+        }
+        @media (max-width: 960px) {
+            .input-area, .layout { grid-template-columns: 1fr; }
+            .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+    </style>
+</head>
+<body>
+<nav>
+    <div class="nav-wrap">
+        <div class="nav-left">
+            <div>
+                <div style="font-size: 17px; font-weight: 700; letter-spacing: 0.4px;">基金实时净值估算</div>
+                <div class="mono" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">NAV ESTIMATOR</div>
+            </div>
+            <div class="nav-links">
+                <a class="nav-link" href="/">分析终端</a>
+                <a class="nav-link" href="/dca">定投看板</a>
+                <a class="nav-link active" href="/nav-estimator">净值估算</a>
+            </div>
+        </div>
+        <div class="mono" style="font-size: 12px; color: var(--text-muted);" id="update-time">--:--:--</div>
+    </div>
+</nav>
+
+<main class="grid">
+    <section class="card">
+        <div class="title">批量实时估值</div>
+        <div class="subtitle">支持单只或多只 6 位基金代码。可用逗号、空格或换行分隔，接口按输入顺序去重并返回逐只结果。</div>
+        <div class="input-area" style="margin-top: 18px;">
+            <div>
+                <textarea id="fund-codes">110011
+161725</textarea>
+            </div>
+            <div class="controls">
+                <div class="toggle">
+                    <input id="strict-mode" type="checkbox" checked>
+                    <div>
+                        <div style="font-size: 14px; font-weight: 600;">严格模式</div>
+                        <div style="font-size: 12px; color: var(--text-muted); margin-top: 3px;">质量优先模式。关键实时数据不足时直接失败，并展示失败原因。</div>
+                    </div>
+                </div>
+                <button class="btn" id="estimate-btn" onclick="estimateNavs()">开始估值</button>
+                <div style="font-size: 12px; color: var(--text-muted); line-height: 1.7;">
+                    输出摘要字段：基金代码、状态、类型、净值日期、估算净值、估算涨跌、置信度、告警数。
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <div id="error-box" class="error hidden"></div>
+
+    <section class="summary-grid">
+        <div class="summary-item">
+            <div class="label">请求基金数</div>
+            <div class="value mono" id="summary-requested">0</div>
+        </div>
+        <div class="summary-item">
+            <div class="label">成功</div>
+            <div class="value mono" id="summary-succeeded" style="color: var(--accent-buy);">0</div>
+        </div>
+        <div class="summary-item">
+            <div class="label">失败</div>
+            <div class="value mono" id="summary-failed" style="color: var(--accent-sell);">0</div>
+        </div>
+        <div class="summary-item">
+            <div class="label">严格模式</div>
+            <div class="value mono" id="summary-strict">true</div>
+        </div>
+    </section>
+
+    <section class="layout">
+        <div class="card">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                <div class="title" style="font-size: 16px; margin-bottom: 0;">结果列表</div>
+                <div class="mono" style="font-size: 12px; color: var(--text-muted);" id="result-count">0 rows</div>
+            </div>
+            <div class="table-shell">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>基金代码</th>
+                            <th>状态</th>
+                            <th>类型</th>
+                            <th>净值日期</th>
+                            <th>估算净值</th>
+                            <th>估算涨跌</th>
+                            <th>置信度</th>
+                            <th>告警</th>
+                        </tr>
+                    </thead>
+                    <tbody id="results-body"></tbody>
+                </table>
+                <div class="empty" id="results-empty">暂无估值结果。</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="title" style="font-size: 16px;">结果详情</div>
+            <div class="subtitle" style="margin-bottom: 12px;">点击左侧任一行查看原始估值字段、告警和持仓代理明细。</div>
+
+            <div id="detail-empty" class="empty">尚未选择结果。</div>
+            <div id="detail-content" class="detail-grid hidden">
+                <div class="detail-box">
+                    <h3>基础字段</h3>
+                    <div class="detail-list" id="detail-meta"></div>
+                </div>
+                <div class="detail-box">
+                    <h3>告警</h3>
+                    <div id="detail-warnings"></div>
+                </div>
+                <div class="detail-box">
+                    <h3>质量门槛</h3>
+                    <div class="detail-list" id="detail-quality"></div>
+                    <div id="detail-quality-reasons"></div>
+                </div>
+                <div class="detail-box">
+                    <h3>数据源</h3>
+                    <pre id="detail-sources"></pre>
+                </div>
+                <div class="detail-box">
+                    <h3>代理指数与持仓明细</h3>
+                    <pre id="detail-breakdown"></pre>
+                </div>
+                <div class="detail-box">
+                    <h3>原始 JSON</h3>
+                    <pre id="detail-json"></pre>
+                </div>
+            </div>
+        </div>
+    </section>
+</main>
+
+<script>
+let currentResults = [];
+let selectedIndex = -1;
+
+function setError(message) {
+    const el = document.getElementById('error-box');
+    if (!message) {
+        el.classList.add('hidden');
+        el.textContent = '';
+        return;
+    }
+    el.textContent = message;
+    el.classList.remove('hidden');
+}
+
+function setSummary(summary) {
+    document.getElementById('summary-requested').textContent = summary.requested ?? 0;
+    document.getElementById('summary-succeeded').textContent = summary.succeeded ?? 0;
+    document.getElementById('summary-failed').textContent = summary.failed ?? 0;
+    document.getElementById('summary-strict').textContent = String(summary.strict_mode ?? true);
+}
+
+function renderResults(results) {
+    currentResults = results || [];
+    const tbody = document.getElementById('results-body');
+    const empty = document.getElementById('results-empty');
+    const count = document.getElementById('result-count');
+    tbody.innerHTML = '';
+    count.textContent = `${currentResults.length} rows`;
+
+    if (currentResults.length === 0) {
+        empty.classList.remove('hidden');
+        renderDetail(null, -1);
+        return;
+    }
+    empty.classList.add('hidden');
+
+    currentResults.forEach((item, index) => {
+        const tr = document.createElement('tr');
+        tr.onclick = () => renderDetail(item, index);
+        const statusClass = item.status === '失败' ? 'status-fail' : 'status-ok';
+        tr.innerHTML = `
+            <td class="mono">${item.fund_code || '--'}</td>
+            <td class="${statusClass}">${item.status || '--'}</td>
+            <td class="mono">${item.fund_type || '--'}</td>
+            <td class="mono">${item.nav_date || '--'}</td>
+            <td class="mono">${formatNumber(item.estimated_nav, 4)}</td>
+            <td class="mono">${formatPercent(item.estimated_return)}</td>
+            <td class="mono">${formatNumber(item.confidence_score, 4)}</td>
+            <td><span class="warn-badge mono">${(item.warnings || []).length}</span></td>
+        `;
+        tbody.appendChild(tr);
+    });
+
+    renderDetail(currentResults[0], 0);
+}
+
+function renderDetail(item, index) {
+    selectedIndex = index;
+    const tbodyRows = Array.from(document.querySelectorAll('#results-body tr'));
+    tbodyRows.forEach((row, rowIndex) => row.classList.toggle('active', rowIndex === index));
+
+    const empty = document.getElementById('detail-empty');
+    const content = document.getElementById('detail-content');
+    const meta = document.getElementById('detail-meta');
+    const warnings = document.getElementById('detail-warnings');
+    const quality = document.getElementById('detail-quality');
+    const qualityReasons = document.getElementById('detail-quality-reasons');
+    const detailSources = document.getElementById('detail-sources');
+    const breakdown = document.getElementById('detail-breakdown');
+    const detailJson = document.getElementById('detail-json');
+
+    if (!item) {
+        empty.classList.remove('hidden');
+        content.classList.add('hidden');
+        return;
+    }
+
+    empty.classList.add('hidden');
+    content.classList.remove('hidden');
+
+    const details = item.details || {};
+    const metaPairs = [
+        ['基金代码', item.fund_code],
+        ['状态', item.status],
+        ['基金类型', item.fund_type],
+        ['净值日期', item.nav_date],
+        ['目标日期', item.target_date],
+        ['估算净值', formatNumber(item.estimated_nav, 4)],
+        ['估算涨跌', formatPercent(item.estimated_return)],
+        ['置信度', formatNumber(item.confidence_score, 4)],
+        ['QDII画像', details.qdii_market_profile || '--'],
+        ['仓位来源', details.position_source || '--'],
+        ['仓位快照来源', details.position_snapshot_source || details.stock_position_snapshot_source || '--'],
+        ['仓位报告日期', details.position_report_date || details.stock_position_report_date || '--'],
+        ['仓位报告期', details.position_raw_report_period || details.stock_position_raw_report_period || '--'],
+        ['测算仓位最新值', formatPercent(details.estimated_position_series_latest)],
+        ['股票行情日期', details.stock_data_as_of_date || '--'],
+        ['指数行情日期', details.index_data_as_of_date || '--'],
+        ['汇率行情日期', details.fx_data_as_of_date || '--'],
+        ['前十大覆盖率', formatPercent(details.top10_quote_coverage != null ? details.top10_quote_coverage * 100 : null)],
+        ['实时覆盖率(持仓)', formatPercent(details.live_quote_coverage_pct)],
+        ['实时覆盖率(仓位)', formatPercent(details.live_quote_weight_pct)],
+        ['代理收益', formatPercent(details.proxy_return)],
+        ['费率拖累', formatPercent(details.fee_drag)],
+    ];
+    meta.innerHTML = metaPairs.map(([label, value]) => `
+        <div class="detail-row">
+            <span>${label}</span>
+            <span class="mono">${value == null || value === '' ? '--' : value}</span>
+        </div>
+    `).join('');
+
+    const warningItems = item.warnings || [];
+    if (warningItems.length === 0) {
+        warnings.innerHTML = '<div class="empty">无告警。</div>';
+    } else {
+        warnings.innerHTML = warningItems.map(text => `<div class="warning-item">${escapeHtml(text)}</div>`).join('');
+    }
+
+    const qualityPairs = [
+        ['质量策略', details.quality_policy || '--'],
+        ['门槛通过', details.quality_gate_passed == null ? '--' : String(details.quality_gate_passed)],
+        ['源冲突数', (details.source_disagreements || []).length],
+    ];
+    quality.innerHTML = qualityPairs.map(([label, value]) => `
+        <div class="detail-row">
+            <span>${label}</span>
+            <span class="mono">${value == null || value === '' ? '--' : value}</span>
+        </div>
+    `).join('');
+
+    const failedReasons = details.quality_gate_failed_reasons || [];
+    if (failedReasons.length === 0) {
+        qualityReasons.innerHTML = '<div class="empty">无质量门槛失败原因。</div>';
+    } else {
+        qualityReasons.innerHTML = failedReasons.map(text => `<div class="warning-item">${escapeHtml(text)}</div>`).join('');
+    }
+
+    detailSources.textContent = JSON.stringify({
+        used_sources: details.used_sources || {},
+        source_disagreements: details.source_disagreements || [],
+    }, null, 2);
+
+    const breakdownObj = {
+        proxy_components: details.proxy_components || [],
+        holdings_details: details.holdings_details || [],
+        missing_quotes: details.missing_quotes || [],
+    };
+    breakdown.textContent = JSON.stringify(breakdownObj, null, 2);
+    detailJson.textContent = JSON.stringify(item, null, 2);
+}
+
+function formatNumber(value, digits) {
+    if (value == null || Number.isNaN(Number(value))) return '--';
+    return Number(value).toFixed(digits);
+}
+
+function formatPercent(value) {
+    if (value == null || Number.isNaN(Number(value))) return '--';
+    const num = Number(value);
+    return `${num >= 0 ? '+' : ''}${num.toFixed(2)}%`;
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;');
+}
+
+async function estimateNavs() {
+    const button = document.getElementById('estimate-btn');
+    button.disabled = true;
+    button.textContent = '估值中...';
+    setError('');
+
+    try {
+        const response = await fetch('/api/nav-estimator/estimate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                fund_codes: document.getElementById('fund-codes').value,
+                strict: document.getElementById('strict-mode').checked,
+            }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            setError(data.error || '请求失败');
+            return;
+        }
+        setSummary(data.summary || {});
+        renderResults(data.results || []);
+        document.getElementById('update-time').textContent = new Date().toLocaleTimeString('zh-CN', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+        });
+    } catch (error) {
+        setError(`网络错误: ${error.message}`);
+    } finally {
+        button.disabled = false;
+        button.textContent = '开始估值';
+    }
+}
+</script>
+</body>
+</html>
