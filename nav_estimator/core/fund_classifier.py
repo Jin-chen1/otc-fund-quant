@@ -1,5 +1,6 @@
 """基金分类器。"""
 
+import re
 from typing import Literal
 
 from loguru import logger
@@ -28,6 +29,8 @@ class FundClassifier:
 
         fund_name_lower = fund_name.lower()
         fund_type_lower = fund_type_str.lower()
+        benchmark_text = str(fund_info.get("benchmark", "")).strip()
+        benchmark_lower = benchmark_text.lower()
 
         hk_keywords = ["港股", "恒生", "香港", "hk", "hsi", "港股通"]
         qdii_keywords = ["qdii", "纳斯达克", "标普", "道琼斯", "海外", "全球"]
@@ -42,7 +45,18 @@ class FundClassifier:
             or "联接" in fund_name
             or "指数增强" in fund_name
         ):
-            if any(kw in fund_name_lower for kw in hk_keywords) or "港股" in fund_type_str:
+            if self._is_a_share_index_fund(
+                fund_name=fund_name,
+                benchmark_text=benchmark_text,
+                benchmark_lower=benchmark_lower,
+            ):
+                return "index_a"
+            if self._is_hk_index_fund(
+                fund_name_lower=fund_name_lower,
+                benchmark_text=benchmark_text,
+                benchmark_lower=benchmark_lower,
+                hk_keywords=hk_keywords,
+            ):
                 return "index_hk"
             return "index_a"
 
@@ -59,6 +73,37 @@ class FundClassifier:
             return "active_hk"
 
         return "active_a"
+
+    def _is_a_share_index_fund(
+        self,
+        *,
+        fund_name: str,
+        benchmark_text: str,
+        benchmark_lower: str,
+    ) -> bool:
+        if any(keyword in benchmark_text or keyword in fund_name for keyword in ["A股", "恒生A股"]):
+            return True
+        if any(char.isdigit() for char in benchmark_text) and any(
+            code.isdigit() and len(code) == 6 for code in re.findall(r"(?<!\d)(\d{6})(?!\d)", benchmark_text)
+        ):
+            return True
+        if self.fund_fetcher.extract_benchmark_equity_index_components(benchmark_text, allowed_markets={"A股"}):
+            return True
+        return any(keyword in benchmark_lower for keyword in ["中证", "上证", "深证", "沪深", "创业板", "科创"])
+
+    def _is_hk_index_fund(
+        self,
+        *,
+        fund_name_lower: str,
+        benchmark_text: str,
+        benchmark_lower: str,
+        hk_keywords: list[str],
+    ) -> bool:
+        if self.fund_fetcher.extract_benchmark_equity_index_components(benchmark_text, allowed_markets={"港股"}):
+            return True
+        if "a股" in benchmark_lower:
+            return False
+        return any(kw in fund_name_lower for kw in hk_keywords) or any(kw in benchmark_lower for kw in hk_keywords)
 
     def get_estimator_params(self, fund_code: str, fund_type: FundType) -> dict:
         return {"fund_code": fund_code, "fund_type": fund_type}

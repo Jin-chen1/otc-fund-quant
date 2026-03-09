@@ -15,7 +15,9 @@ if PROJECT_PARENT not in sys.path:
     sys.path.insert(0, PROJECT_PARENT)
 
 from otc_fund_quant.nav_estimator.core.batch_context import BatchContext
+from otc_fund_quant.nav_estimator.core.fund_classifier import FundClassifier
 from otc_fund_quant.nav_estimator.core.quality_gate import QualityGateError
+from otc_fund_quant.nav_estimator.core.nav_engine import NAVEngine
 from otc_fund_quant.nav_estimator.data.fetcher.base_fetcher import BaseFetcher
 from otc_fund_quant.nav_estimator.data.fetcher.fund_fetcher import FundFetcher
 from otc_fund_quant.nav_estimator.estimator.active_equity_estimator import ActiveEquityEstimator
@@ -811,6 +813,243 @@ def test_qdii_non_strict_never_calls_full_market_fallback():
 
     assert result["estimated_nav"] > 0
     assert set(result["missing_quotes"]) == {"00700", "00941"}
+
+
+def test_lookup_a_index_code_by_name_matches_normalized_name():
+    fetcher = FundFetcher()
+    fake_df = pd.DataFrame(
+        [
+            {"代码": "930001", "名称": "中证机器人指数"},
+            {"代码": "000906", "名称": "中证800"},
+        ]
+    )
+
+    with patch("otc_fund_quant.nav_estimator.data.fetcher.fund_fetcher.ak.stock_zh_index_spot_em", return_value=fake_df):
+        resolved = fetcher._lookup_a_index_code_by_name("中证机器人")
+
+    assert resolved["code"] == "930001"
+    assert resolved["name"] == "中证机器人指数"
+
+
+def test_resolve_a_index_code_supports_extended_aliases_and_dynamic_lookup():
+    fetcher = FundFetcher()
+
+    def lookup_side_effect(index_name):
+        mapping = {
+            "中证机器人指数": {"code": "930001", "name": "中证机器人指数"},
+            "恒生A股电网设备指数": {"code": "930999", "name": "恒生A股电网设备指数"},
+        }
+        return mapping[index_name]
+
+    with patch.object(fetcher, "_lookup_a_index_code_by_name", side_effect=lookup_side_effect):
+        assert fetcher.resolve_a_index_code({"benchmark": "中证800指数收益率×95%+存款利率×5%"}) == "000906"
+        assert fetcher.resolve_a_index_code({"benchmark": "中证机器人指数收益率×95%+存款利率×5%"}) == "930001"
+        assert fetcher.resolve_a_index_code({"benchmark": "恒生A股电网设备指数收益率×95%+存款利率×5%"}) == "930999"
+
+
+def test_resolve_active_proxy_components_filters_non_equity_and_renormalizes_weights():
+    fetcher = FundFetcher()
+
+    def lookup_side_effect(index_name):
+        mapping = {
+            "中证医药卫生指数": {"code": "930100", "name": "中证医药卫生指数"},
+            "中证港股通综合指数": {"code": "930200", "name": "中证港股通综合指数"},
+        }
+        return mapping[index_name]
+
+    with patch.object(fetcher, "_lookup_a_index_code_by_name", side_effect=lookup_side_effect):
+        components = fetcher.resolve_active_proxy_components(
+            {
+                "code": "015916",
+                "benchmark": "中证医药卫生指数收益率×70%+中证港股通综合指数收益率（人民币）×10%+中债-综合指数（全价）收益率×20%",
+            }
+        )
+
+    assert [item["code"] for item in components] == ["930100", "930200"]
+    assert round(components[0]["weight"], 3) == 0.875
+    assert round(components[1]["weight"], 3) == 0.125
+
+
+def test_resolve_active_proxy_components_supports_single_equity_index_with_cash_benchmark():
+    fetcher = FundFetcher()
+
+    components = fetcher.resolve_active_proxy_components(
+        {
+            "code": "018291",
+            "benchmark": "中证800指数收益率×65%+一年期人民币定期存款利率（税后）×35%",
+        }
+    )
+
+    assert len(components) == 1
+    assert components[0]["code"] == "000906"
+    assert components[0]["weight"] == 1.0
+
+
+def test_resolve_active_proxy_components_rejects_non_equity_only_benchmark():
+    fetcher = FundFetcher()
+
+    with pytest.raises(ValueError, match="未识别到任何权益指数名称"):
+        fetcher.resolve_active_proxy_components(
+            {
+                "code": "099999",
+                "benchmark": "中债-综合指数收益率×80%+银行活期存款利率（税后）×20%",
+            }
+        )
+
+
+def test_fund_classifier_prefers_a_share_index_when_hengsheng_a_share_present():
+    classifier = FundClassifier()
+
+    with patch.object(
+        classifier.fund_fetcher,
+        "_lookup_a_index_code_by_name",
+        return_value={"code": "930999", "name": "恒生A股电网设备指数"},
+    ):
+        fund_type = classifier.classify(
+            "023639",
+            fund_info={
+                "code": "023639",
+                "name": "国泰恒生A股电网设备交易型开放式指数证券投资基金发起式联接基金",
+                "type": "股票型-标准指数",
+                "benchmark": "恒生A股电网设备指数收益率*95%+银行活期存款利率(税后)*5%",
+            },
+        )
+
+    assert fund_type == "index_a"
+
+
+def test_fund_classifier_keeps_qdii_priority():
+    classifier = FundClassifier()
+
+    fund_type = classifier.classify(
+        "020989",
+        fund_info={
+            "code": "020989",
+            "name": "南方恒生科技交易型开放式指数证券投资基金发起式联接基金（QDII）",
+            "type": "QDII-股票",
+            "benchmark": "经汇率调整后的恒生科技指数收益率×95%+银行人民币活期存款利率（税后）×5%",
+        },
+    )
+
+    assert fund_type == "qdii"
+
+
+def test_nav_engine_strict_run_avoids_prefetch_failures_for_supported_cases():
+    engine = NAVEngine(strict=True)
+    holdings_df = pd.DataFrame([{"code": "600000", "name": "A", "weight": 10.0, "market": "A股"}])
+    fund_info_map = {
+        "015916": {
+            "code": "015916",
+            "name": "永赢医药创新智选混合型发起式证券投资基金",
+            "type": "混合型-偏股",
+            "benchmark": "中证医药卫生指数收益率×70%+中证港股通综合指数收益率（人民币）×10%+中债-综合指数（全价）收益率×20%",
+            "management_fee": 0.015,
+            "custody_fee": 0.002,
+        },
+        "018291": {
+            "code": "018291",
+            "name": "广发新兴成长灵活配置混合型证券投资基金",
+            "type": "混合型-灵活配置",
+            "benchmark": "中证800指数收益率×65%+一年期人民币定期存款利率（税后）×35%",
+            "management_fee": 0.015,
+            "custody_fee": 0.002,
+        },
+        "018345": {
+            "code": "018345",
+            "name": "华夏中证机器人交易型开放式指数证券投资基金发起式联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "中证机器人指数收益率×95%＋人民币活期存款税后利率×5%",
+            "management_fee": 0.005,
+            "custody_fee": 0.001,
+        },
+        "020989": {
+            "code": "020989",
+            "name": "南方恒生科技交易型开放式指数证券投资基金发起式联接基金（QDII）",
+            "type": "QDII-股票",
+            "benchmark": "经汇率调整后的恒生科技指数收益率×95%+银行人民币活期存款利率（税后）×5%",
+            "management_fee": 0.015,
+            "custody_fee": 0.003,
+            "investment_strategy": "",
+            "investment_target": "",
+        },
+        "023639": {
+            "code": "023639",
+            "name": "国泰恒生A股电网设备交易型开放式指数证券投资基金发起式联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "恒生A股电网设备指数收益率*95%+银行活期存款利率(税后)*5%",
+            "management_fee": 0.005,
+            "custody_fee": 0.001,
+        },
+    }
+
+    def lookup_side_effect(index_name):
+        mapping = {
+            "中证医药卫生指数": {"code": "930100", "name": "中证医药卫生指数"},
+            "中证港股通综合指数": {"code": "930200", "name": "中证港股通综合指数"},
+            "中证机器人指数": {"code": "930001", "name": "中证机器人指数"},
+            "恒生A股电网设备指数": {"code": "930999", "name": "恒生A股电网设备指数"},
+        }
+        return mapping[index_name]
+
+    def estimate_success(**kwargs):
+        return {
+            "fund_code": kwargs["fund_code"],
+            "estimated_nav": 1.01,
+            "estimated_return": 0.1,
+            "nav_date": kwargs["nav_date"],
+            "warnings": [],
+        }
+
+    with patch.object(engine.fund_fetcher, "get_fund_info", side_effect=lambda code: fund_info_map[code]), \
+         patch.object(engine.fund_fetcher, "get_previous_official_nav", return_value=(1.0, "2026-03-07")), \
+         patch.object(engine.fund_fetcher, "get_portfolio_holdings", return_value=holdings_df), \
+         patch.object(engine.fund_fetcher, "_lookup_a_index_code_by_name", side_effect=lookup_side_effect), \
+         patch.object(engine.classifier.fund_fetcher, "_lookup_a_index_code_by_name", side_effect=lookup_side_effect), \
+         patch("otc_fund_quant.nav_estimator.core.nav_engine.build_confidence_payload", return_value={}), \
+         patch.object(engine.equity_estimator, "estimate", side_effect=estimate_success) as mock_equity_estimate, \
+         patch.object(engine.index_estimator, "estimate", side_effect=estimate_success) as mock_index_estimate, \
+         patch.object(engine.qdii_estimator, "estimate", side_effect=estimate_success) as mock_qdii_estimate:
+        results_df = engine.run(["015916", "018291", "018345", "020989", "023639"], strict=True)
+
+    assert list(results_df["fund_code"]) == ["015916", "018291", "018345", "020989", "023639"]
+    assert set(results_df["status"]) == {"成功"}
+    result_map = {row["fund_code"]: row["fund_type"] for row in results_df.to_dict(orient="records")}
+    assert result_map["015916"] == "active_a"
+    assert result_map["018291"] == "active_a"
+    assert result_map["018345"] == "index_a"
+    assert result_map["020989"] == "qdii"
+    assert result_map["023639"] == "index_a"
+    assert {call.kwargs["fund_code"] for call in mock_equity_estimate.call_args_list} == {"015916", "018291"}
+    assert {call.kwargs["fund_code"] for call in mock_index_estimate.call_args_list} == {"018345", "023639"}
+    assert {call.kwargs["fund_code"] for call in mock_qdii_estimate.call_args_list} == {"020989"}
+
+
+def test_qdii_index_strict_still_rejects_zero_disclosed_stock_position():
+    estimator = QDIIHKEstimator()
+
+    with patch.object(estimator.fund_fetcher, "get_fund_stock_position_snapshot", return_value={
+        "position": 0.0,
+        "report_date": "2025-12-31",
+        "raw_report_period": "2025-12-31",
+        "snapshot_source": "pingzhongdata_asset_allocation",
+    }), \
+         patch.object(estimator.fx_fetcher, "get_hkd_cny_daily_change_live", return_value={
+             "value": 0.0,
+             "source": "safe_mid_rate",
+             "source_disagreements": [],
+             "data_as_of_date": "2026-03-08",
+         }):
+        with pytest.raises(ValueError, match="QDII股票仓位非法"):
+            estimator.estimate(
+                fund_code="900999",
+                last_nav=1.0,
+                nav_date="2026-03-07",
+                target_date="2026-03-08",
+                is_index_fund=True,
+                market_profile="hk",
+                proxy_components=[{"code": "HSI", "name": "恒生指数", "market": "港股", "weight": 1.0}],
+                strict=True,
+            )
 
 
 def test_nav_estimator_page_default_strict_checked():

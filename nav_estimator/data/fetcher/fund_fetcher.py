@@ -10,7 +10,12 @@ import pandas as pd
 import requests
 from loguru import logger
 
-from ...config.settings import PROXY_INDEX_MAP, QDII_PROXY_BASKETS
+from ...config.settings import (
+    INDEX_ALIAS_CATALOG,
+    NON_EQUITY_BENCHMARK_KEYWORDS,
+    PROXY_INDEX_MAP,
+    QDII_PROXY_BASKETS,
+)
 from .base_fetcher import BaseFetcher
 from .historical_provider import AkshareHistoricalDataProvider, HistoricalDataProvider
 
@@ -35,6 +40,16 @@ class FundFetcher(BaseFetcher):
         "报告日期",
         "截止日期",
         "公告日期",
+    )
+    A_INDEX_SPOT_SYMBOL_CANDIDATES = (
+        "沪深重要指数",
+        "上证系列指数",
+        "深证系列指数",
+        "中证系列指数",
+        "指数成份",
+    )
+    GENERIC_A_INDEX_PATTERN = re.compile(
+        r"([A-Za-z0-9\u4e00-\u9fa5\-]+?指数(?:（人民币）|\(人民币\)|（全价）|\(全价\))?)"
     )
 
     def __init__(self, historical_provider: HistoricalDataProvider | None = None):
@@ -479,6 +494,288 @@ class FundFetcher(BaseFetcher):
         ]
         return " ".join(text_items)
 
+    @staticmethod
+    def _normalize_index_name(index_name: str) -> str:
+        normalized = str(index_name).strip().lower()
+        normalized = normalized.replace("（", "(").replace("）", ")").replace("＋", "+")
+        normalized = re.sub(r"\s+", "", normalized)
+        for token in (
+            "收益率",
+            "(人民币)",
+            "（人民币）",
+            "(全价)",
+            "（全价）",
+            "(税后)",
+            "（税后）",
+        ):
+            normalized = normalized.replace(token, "")
+        if normalized.endswith("指数"):
+            normalized = normalized[:-2]
+        return normalized
+
+    @staticmethod
+    def _is_non_equity_benchmark_text(text: str) -> bool:
+        normalized = str(text).strip().lower()
+        return any(keyword.lower() in normalized for keyword in NON_EQUITY_BENCHMARK_KEYWORDS)
+
+    @staticmethod
+    def _extract_weight_nearby(source_text: str, start: int, end: int) -> float | None:
+        suffix_window = source_text[end:]
+        prefix_window = source_text[:start]
+        suffix_match = re.search(r"(?:\*|×|x|X)?\s*(\d+(?:\.\d+)?)\s*%", suffix_window)
+        if suffix_match is not None:
+            return float(suffix_match.group(1))
+        prefix_match = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:\*|×|x|X)?\s*$", prefix_window)
+        if prefix_match is not None:
+            return float(prefix_match.group(1))
+        return None
+
+    @staticmethod
+    def _dedupe_index_records(records: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        deduped: list[tuple[str, str]] = []
+        seen_codes = set()
+        for code, name in records:
+            if code in seen_codes:
+                continue
+            seen_codes.add(code)
+            deduped.append((code, name))
+        return deduped
+
+    @BaseFetcher.with_cache(ttl=86400)
+    @BaseFetcher.retry_on_error(max_retries=3)
+    def _lookup_a_index_code_by_name(self, index_name: str) -> dict[str, str]:
+        target_name = str(index_name).strip()
+        if target_name == "":
+            raise ValueError("指数名称不能为空")
+
+        target_normalized = self._normalize_index_name(target_name)
+        exact_matches: list[tuple[str, str]] = []
+        normalized_matches: list[tuple[str, str]] = []
+        fuzzy_matches: list[tuple[str, str]] = []
+
+        for symbol in self.A_INDEX_SPOT_SYMBOL_CANDIDATES:
+            index_df = ak.stock_zh_index_spot_em(symbol=symbol)
+            if "名称" not in index_df.columns or "代码" not in index_df.columns:
+                continue
+            for _, row in index_df[["名称", "代码"]].dropna().drop_duplicates().iterrows():
+                name = str(row["名称"]).strip()
+                code = str(row["代码"]).strip()
+                if name == "" or not (len(code) == 6 and code.isdigit()):
+                    continue
+                if self._is_non_equity_benchmark_text(name):
+                    continue
+
+                normalized_name = self._normalize_index_name(name)
+                record = (code, name)
+                if name == target_name:
+                    exact_matches.append(record)
+                elif normalized_name == target_normalized:
+                    normalized_matches.append(record)
+                elif target_normalized in normalized_name or normalized_name in target_normalized:
+                    fuzzy_matches.append(record)
+
+        exact_matches = self._dedupe_index_records(exact_matches)
+        normalized_matches = self._dedupe_index_records(normalized_matches)
+        fuzzy_matches = self._dedupe_index_records(fuzzy_matches)
+
+        for candidates, reason in (
+            (exact_matches, "精确名称"),
+            (normalized_matches, "规范化名称"),
+            (fuzzy_matches, "模糊名称"),
+        ):
+            if len(candidates) == 1:
+                code, matched_name = candidates[0]
+                logger.debug(f"A股指数名称查码成功: {target_name} -> {matched_name} ({code}), reason={reason}")
+                return {"code": code, "name": matched_name}
+            if len(candidates) > 1:
+                raise ValueError(
+                    f"已识别指数名称 {target_name}，但映射到多个A股指数代码: "
+                    + ", ".join(f"{name}({code})" for code, name in candidates)
+                )
+
+        raise ValueError(f"已识别指数名称 {target_name}，但无法映射到A股指数代码")
+
+    def _resolve_index_code_from_alias_entry(self, entry: dict[str, Any]) -> tuple[str, str]:
+        code = entry.get("code")
+        if code:
+            return str(code), str(entry["canonical_name"])
+        if entry.get("market") != "A股":
+            raise ValueError(f"指数别名 {entry.get('canonical_name')} 缺少代码")
+        resolved = self._lookup_a_index_code_by_name(str(entry["canonical_name"]))
+        return str(resolved["code"]), str(resolved["name"])
+
+    def extract_benchmark_equity_index_components(
+        self,
+        source_text: str,
+        allowed_markets: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        normalized_source_text = str(source_text).strip()
+        if normalized_source_text == "":
+            return []
+
+        searchable_text = normalized_source_text.lower()
+        raw_components: list[dict[str, Any]] = []
+        occupied_spans: list[tuple[int, int]] = []
+        seen_codes = set()
+        seen_names = set()
+
+        alias_entries: list[tuple[int, dict[str, Any], str]] = []
+        for entry in INDEX_ALIAS_CATALOG:
+            market = str(entry.get("market", "")).strip()
+            if allowed_markets is not None and market not in allowed_markets:
+                continue
+            for alias in entry.get("aliases", []):
+                alias_entries.append((len(str(alias)), entry, str(alias)))
+
+        alias_entries.sort(key=lambda item: item[0], reverse=True)
+
+        for _, entry, alias in alias_entries:
+            alias_lower = alias.lower()
+            for match in re.finditer(re.escape(alias_lower), searchable_text):
+                start, end = match.span()
+                if any(not (end <= span_start or start >= span_end) for span_start, span_end in occupied_spans):
+                    continue
+                try:
+                    code, resolved_name = self._resolve_index_code_from_alias_entry(entry)
+                except Exception as e:
+                    logger.debug(f"指数别名解析失败: alias={alias}, reason={e}")
+                    continue
+                if code in seen_codes:
+                    continue
+                normalized_name = self._normalize_index_name(resolved_name)
+                if normalized_name in seen_names:
+                    continue
+                raw_components.append(
+                    {
+                        "code": code,
+                        "name": resolved_name,
+                        "market": entry["market"],
+                        "raw_weight_pct": self._extract_weight_nearby(normalized_source_text, start, end),
+                        "position": start,
+                        "match_end": end,
+                        "is_fallback": False,
+                    }
+                )
+                occupied_spans.append((start, end))
+                seen_codes.add(code)
+                seen_names.add(normalized_name)
+                break
+
+        if allowed_markets is None or "A股" in allowed_markets:
+            for match in self.GENERIC_A_INDEX_PATTERN.finditer(normalized_source_text):
+                start, end = match.span(1)
+                if any(not (end <= span_start or start >= span_end) for span_start, span_end in occupied_spans):
+                    continue
+                candidate_name = str(match.group(1)).strip()
+                if candidate_name == "" or self._is_non_equity_benchmark_text(candidate_name):
+                    continue
+                normalized_name = self._normalize_index_name(candidate_name)
+                if normalized_name in seen_names:
+                    continue
+                try:
+                    resolved = self._lookup_a_index_code_by_name(candidate_name)
+                except Exception as e:
+                    logger.debug(f"动态A股指数查码失败: {candidate_name}, reason={e}")
+                    continue
+                code = str(resolved["code"])
+                if code in seen_codes:
+                    continue
+                raw_components.append(
+                    {
+                        "code": code,
+                        "name": str(resolved["name"]),
+                        "market": "A股",
+                        "raw_weight_pct": self._extract_weight_nearby(normalized_source_text, start, end),
+                        "position": start,
+                        "match_end": end,
+                        "is_fallback": False,
+                    }
+                )
+                occupied_spans.append((start, end))
+                seen_codes.add(code)
+                seen_names.add(normalized_name)
+
+        raw_components.sort(key=lambda item: item["position"])
+        if raw_components:
+            logger.debug(
+                "解析权益基准组件: "
+                + ", ".join(
+                    f"{item['name']}({item['code']},{item['market']},weight={item['raw_weight_pct']})"
+                    for item in raw_components
+                )
+            )
+        return raw_components
+
+    def _normalize_weighted_proxy_components(
+        self,
+        raw_components: list[dict[str, Any]],
+        source_text: str,
+        fund_info: dict[str, Any],
+        *,
+        missing_weight_message: str,
+        empty_component_message: str,
+    ) -> list[dict[str, Any]]:
+        if not raw_components:
+            raise ValueError(empty_component_message)
+
+        normalized_source_text = str(source_text)
+        raw_components = sorted(raw_components, key=lambda item: item["position"])
+        for idx, component in enumerate(raw_components):
+            if component.get("is_fallback", False):
+                component["raw_weight_pct"] = None
+                continue
+            left_boundary = 0 if idx == 0 else raw_components[idx - 1]["match_end"]
+            right_boundary = len(normalized_source_text) if idx == len(raw_components) - 1 else raw_components[idx + 1]["position"]
+            left_boundary = min(left_boundary, component["position"])
+            right_boundary = max(right_boundary, component["match_end"])
+            local_text = normalized_source_text[left_boundary:right_boundary]
+            local_start = component["position"] - left_boundary
+            local_end = component["match_end"] - left_boundary
+            component["raw_weight_pct"] = self._extract_weight_nearby(local_text, local_start, local_end)
+
+        explicit_weights = []
+        missing_weight_count = 0
+        for component in raw_components:
+            weight = component["raw_weight_pct"]
+            if weight is None:
+                missing_weight_count += 1
+                continue
+            if weight <= 0:
+                raise ValueError(f"基金 {fund_info.get('code', '')} 的业绩比较基准权重非法(<=0): {weight}")
+            explicit_weights.append(weight)
+
+        if missing_weight_count > 0 and explicit_weights and len(raw_components) > 1:
+            raise ValueError(missing_weight_message)
+
+        components: list[dict[str, Any]] = []
+        if explicit_weights:
+            weight_sum = sum(explicit_weights)
+            if weight_sum <= 0:
+                raise ValueError(f"基金 {fund_info.get('code', '')} 的业绩比较基准权重和非法: {weight_sum}")
+            for component in raw_components:
+                weight = component["raw_weight_pct"] or 0.0
+                components.append(
+                    {
+                        "code": component["code"],
+                        "name": component["name"],
+                        "market": component["market"],
+                        "weight": weight / weight_sum,
+                    }
+                )
+            return components
+
+        equal_weight = 1.0 / len(raw_components)
+        for component in raw_components:
+            components.append(
+                {
+                    "code": component["code"],
+                    "name": component["name"],
+                    "market": component["market"],
+                    "weight": equal_weight,
+                }
+            )
+        return components
+
     def resolve_qdii_market_profile(self, fund_info: dict[str, Any]) -> str:
         analysis_text = self._build_analysis_text(fund_info)
         analysis_text_lower = analysis_text.lower()
@@ -624,168 +921,36 @@ class FundFetcher(BaseFetcher):
 
     def resolve_a_index_code(self, fund_info: dict[str, Any]) -> str:
         analysis_text = self._build_analysis_text(fund_info)
-        ordered_keywords = ["沪深300", "中证500", "中证1000", "上证50", "中证白酒", "创业板指", "科创50"]
-        for keyword in ordered_keywords:
-            if keyword in analysis_text and keyword in PROXY_INDEX_MAP:
-                return PROXY_INDEX_MAP[keyword]
+        raw_components = self.extract_benchmark_equity_index_components(analysis_text, allowed_markets={"A股"})
+        if raw_components:
+            return str(raw_components[0]["code"])
         code_match = re.search(r"(?<!\d)(\d{6})(?!\d)", analysis_text)
         if code_match:
             return code_match.group(1)
-        raise ValueError(f"基金 {fund_info.get('code', '')} 无法从信息中识别A股跟踪指数，请检查业绩比较基准字段")
+        raise ValueError(f"基金 {fund_info.get('code', '')} 未识别到任何A股权益指数名称，请检查业绩比较基准字段")
 
     def resolve_hk_index_code(self, fund_info: dict[str, Any]) -> str:
         analysis_text = self._build_analysis_text(fund_info)
-        if "恒生科技" in analysis_text or "hstech" in analysis_text.lower():
-            return "HSTECH"
-        hk_keywords = ["恒生指数", "恒生综合", "恒生", "hsi"]
-        if any(keyword in analysis_text.lower() for keyword in ["hsi"]):
-            return "HSI"
-        if any(keyword in analysis_text for keyword in hk_keywords):
-            return "HSI"
-        raise ValueError(f"基金 {fund_info.get('code', '')} 无法从信息中识别港股跟踪指数，请检查业绩比较基准字段")
+        raw_components = self.extract_benchmark_equity_index_components(analysis_text, allowed_markets={"港股"})
+        if raw_components:
+            return str(raw_components[0]["code"])
+        raise ValueError(f"基金 {fund_info.get('code', '')} 未识别到任何港股权益指数名称，请检查业绩比较基准字段")
 
     def resolve_active_proxy_components(self, fund_info: dict[str, Any]) -> list[dict[str, Any]]:
         benchmark_text = str(fund_info.get("benchmark", "")).strip()
         if benchmark_text == "":
             raise ValueError(f"基金 {fund_info.get('code', '')} 缺少业绩比较基准，无法解析主动权益代理指数")
-
-        def _extract_weight_nearby(source_text: str, start: int, end: int) -> float | None:
-            suffix_window = source_text[end:]
-            prefix_window = source_text[:start]
-            suffix_match = re.search(r"(?:\*|×|x|X)?\s*(\d+(?:\.\d+)?)\s*%", suffix_window)
-            if suffix_match is not None:
-                return float(suffix_match.group(1))
-            prefix_match = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:\*|×|x|X)?\s*$", prefix_window)
-            if prefix_match is not None:
-                return float(prefix_match.group(1))
-            return None
-
-        keyword_candidates = [
-            ("恒生科技", "恒生科技", "HSTECH", "港股"),
-            ("hstech", "恒生科技", "HSTECH", "港股"),
-            ("恒生指数", "恒生指数", "HSI", "港股"),
-            ("恒生综合", "恒生综合", "HSI", "港股"),
-            ("hsi", "恒生指数", "HSI", "港股"),
-            ("恒生", "恒生指数", "HSI", "港股"),
-            ("沪深300", "沪深300", PROXY_INDEX_MAP["沪深300"], "A股"),
-            ("中证1000", "中证1000", PROXY_INDEX_MAP["中证1000"], "A股"),
-            ("中证500", "中证500", PROXY_INDEX_MAP["中证500"], "A股"),
-            ("上证50", "上证50", PROXY_INDEX_MAP["上证50"], "A股"),
-            ("创业板指", "创业板指", PROXY_INDEX_MAP["创业板指"], "A股"),
-            ("科创50", "科创50", PROXY_INDEX_MAP["科创50"], "A股"),
-            ("中证白酒", "中证白酒", PROXY_INDEX_MAP["中证白酒"], "A股"),
-        ]
-
-        raw_components: list[dict[str, Any]] = []
-        seen_codes = set()
-        for keyword, name, code, market in keyword_candidates:
-            if code in seen_codes:
-                continue
-            matched = re.search(re.escape(keyword), benchmark_text, flags=re.IGNORECASE)
-            if matched is None:
-                continue
-            raw_weight_pct = _extract_weight_nearby(benchmark_text, matched.start(), matched.end())
-            raw_components.append(
-                {
-                    "code": code,
-                    "name": name,
-                    "market": market,
-                    "raw_weight_pct": raw_weight_pct,
-                    "position": matched.start(),
-                    "match_end": matched.end(),
-                    "is_fallback": False,
-                }
-            )
-            seen_codes.add(code)
-
-        for matched in re.finditer(r"(?<!\d)(\d{6})(?!\d)", benchmark_text):
-            code = matched.group(1)
-            if code in seen_codes:
-                continue
-            raw_weight_pct = _extract_weight_nearby(benchmark_text, matched.start(), matched.end())
-            raw_components.append(
-                {
-                    "code": code,
-                    "name": code,
-                    "market": "A股",
-                    "raw_weight_pct": raw_weight_pct,
-                    "position": matched.start(),
-                    "match_end": matched.end(),
-                    "is_fallback": False,
-                }
-            )
-            seen_codes.add(code)
-
-        if not raw_components:
-            fallback_code = self.resolve_a_index_code(fund_info)
-            raw_components = [
-                {
-                    "code": fallback_code,
-                    "name": fallback_code,
-                    "market": "A股",
-                    "raw_weight_pct": None,
-                    "position": 0,
-                    "match_end": 0,
-                    "is_fallback": True,
-                }
-            ]
-
-        raw_components = sorted(raw_components, key=lambda item: item["position"])
-        for idx, component in enumerate(raw_components):
-            if component.get("is_fallback", False):
-                component["raw_weight_pct"] = None
-                continue
-            left_boundary = 0 if idx == 0 else raw_components[idx - 1]["match_end"]
-            right_boundary = len(benchmark_text) if idx == len(raw_components) - 1 else raw_components[idx + 1]["position"]
-            left_boundary = min(left_boundary, component["position"])
-            right_boundary = max(right_boundary, component["match_end"])
-            local_text = benchmark_text[left_boundary:right_boundary]
-            local_start = component["position"] - left_boundary
-            local_end = component["match_end"] - left_boundary
-            component["raw_weight_pct"] = _extract_weight_nearby(local_text, local_start, local_end)
-
-        explicit_weights = []
-        missing_weight_count = 0
-        for component in raw_components:
-            weight = component["raw_weight_pct"]
-            if weight is None:
-                missing_weight_count += 1
-                continue
-            if weight <= 0:
-                raise ValueError(f"基金 {fund_info.get('code', '')} 的业绩比较基准权重非法(<=0): {weight}")
-            explicit_weights.append(weight)
-
-        if missing_weight_count > 0 and explicit_weights and len(raw_components) > 1:
-            raise ValueError(f"基金 {fund_info.get('code', '')} 的业绩比较基准存在部分指数缺失权重，无法确定代理指数组合")
-
-        components: list[dict[str, Any]] = []
-        if explicit_weights:
-            weight_sum = sum(explicit_weights)
-            if weight_sum <= 0:
-                raise ValueError(f"基金 {fund_info.get('code', '')} 的业绩比较基准权重和非法: {weight_sum}")
-            for component in raw_components:
-                normalized_weight = component["raw_weight_pct"] / weight_sum
-                components.append(
-                    {
-                        "code": component["code"],
-                        "name": component["name"],
-                        "market": component["market"],
-                        "weight": normalized_weight,
-                    }
-                )
-        else:
-            equal_weight = 1.0 / len(raw_components)
-            for component in raw_components:
-                components.append(
-                    {
-                        "code": component["code"],
-                        "name": component["name"],
-                        "market": component["market"],
-                        "weight": equal_weight,
-                    }
-                )
-
-        return components
+        raw_components = self.extract_benchmark_equity_index_components(
+            benchmark_text,
+            allowed_markets={"A股", "港股"},
+        )
+        return self._normalize_weighted_proxy_components(
+            raw_components,
+            benchmark_text,
+            fund_info,
+            missing_weight_message=f"基金 {fund_info.get('code', '')} 的权益业绩基准存在部分指数缺失权重，无法确定代理指数组合",
+            empty_component_message=f"基金 {fund_info.get('code', '')} 未识别到任何权益指数名称，请检查业绩比较基准字段",
+        )
 
     def is_index_fund(self, fund_info: dict[str, Any]) -> bool:
         analysis_text = self._build_analysis_text(fund_info).lower()

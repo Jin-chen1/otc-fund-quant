@@ -57,6 +57,7 @@ AKSHARE_RETRIES = 3
 
 PROXY_INDEX_MAP = {
     "沪深300": "000300",
+    "中证800": "000906",
     "中证500": "000905",
     "中证1000": "000852",
     "中证转债": "000832",
@@ -72,6 +73,40 @@ PROXY_INDEX_MAP = {
     "纳斯达克": "NDX",
     "道琼斯": "DJIA",
 }
+
+INDEX_ALIAS_CATALOG = [
+    {"canonical_name": "沪深300", "code": "000300", "market": "A股", "aliases": ["沪深300", "沪深300指数"]},
+    {"canonical_name": "中证800", "code": "000906", "market": "A股", "aliases": ["中证800", "中证800指数"]},
+    {"canonical_name": "中证500", "code": "000905", "market": "A股", "aliases": ["中证500", "中证500指数"]},
+    {"canonical_name": "中证1000", "code": "000852", "market": "A股", "aliases": ["中证1000", "中证1000指数"]},
+    {"canonical_name": "上证50", "code": "000016", "market": "A股", "aliases": ["上证50", "上证50指数"]},
+    {"canonical_name": "创业板指", "code": "399006", "market": "A股", "aliases": ["创业板指", "创业板指数"]},
+    {"canonical_name": "科创50", "code": "000688", "market": "A股", "aliases": ["科创50", "科创50指数"]},
+    {"canonical_name": "中证白酒", "code": "399997", "market": "A股", "aliases": ["中证白酒", "中证白酒指数"]},
+    {"canonical_name": "中证医药卫生", "code": None, "market": "A股", "aliases": ["中证医药卫生", "中证医药卫生指数"]},
+    {"canonical_name": "中证机器人", "code": None, "market": "A股", "aliases": ["中证机器人", "中证机器人指数"]},
+    {"canonical_name": "中证港股通综合", "code": None, "market": "A股", "aliases": ["中证港股通综合", "中证港股通综合指数"]},
+    {"canonical_name": "恒生A股电网设备", "code": None, "market": "A股", "aliases": ["恒生A股电网设备", "恒生A股电网设备指数"]},
+    {"canonical_name": "恒生科技", "code": "HSTECH", "market": "港股", "aliases": ["恒生科技指数", "恒生科技", "hstech"]},
+    {"canonical_name": "恒生指数", "code": "HSI", "market": "港股", "aliases": ["恒生指数", "恒生综合", "hsi", "hang seng"]},
+    {"canonical_name": "标普500", "code": "SPX", "market": "美股", "aliases": ["标普500", "标普500指数", "s&p500", "s&p 500", "sp500"]},
+    {"canonical_name": "纳斯达克100", "code": "NDX", "market": "美股", "aliases": ["纳斯达克100", "纳指100", "nasdaq100", "nasdaq 100", "纳斯达克"]},
+    {"canonical_name": "道琼斯", "code": "DJIA", "market": "美股", "aliases": ["道琼斯", "dow jones"]},
+]
+
+NON_EQUITY_BENCHMARK_KEYWORDS = [
+    "中债",
+    "国债",
+    "信用债",
+    "债券",
+    "存款",
+    "活期",
+    "定期",
+    "银行",
+    "税后",
+    "现金",
+    "货币市场",
+]
 
 QDII_PROXY_BASKETS = {
     "hk_broad": [
@@ -125,6 +160,8 @@ class Settings:
         self.bond_plus_regression = BOND_PLUS_REGRESSION
         self.bond_stale_fallback = BOND_STALE_FALLBACK
         self.proxy_index_map = PROXY_INDEX_MAP
+        self.index_alias_catalog = INDEX_ALIAS_CATALOG
+        self.non_equity_benchmark_keywords = NON_EQUITY_BENCHMARK_KEYWORDS
         self.qdii_proxy_baskets = QDII_PROXY_BASKETS
         self.bond_index_types = BOND_INDEX_TYPES
         self.bond_plus_model = BOND_PLUS_MODEL

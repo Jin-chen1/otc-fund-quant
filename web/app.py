@@ -33,11 +33,13 @@ from otc_fund_quant.analysis.backtest import calc_period_returns
 from otc_fund_quant.analysis.chart import get_chart_data
 from otc_fund_quant.config.loader import load_strategy_params
 from otc_fund_quant.nav_estimator import NAVEngine
+from otc_fund_quant.nav_estimator.data.fetcher.fund_fetcher import FundFetcher
 
 app = Flask(__name__)
 
 # 全局数据加载器
 loader = DataLoader(db_path=os.environ.get("OTC_FUND_QUANT_NAV_DB_PATH"))
+dca_fund_fetcher = FundFetcher()
 
 # 推荐记录数据库路径
 REC_DB_PATH = os.environ.get(
@@ -346,6 +348,24 @@ def _get_latest_nav_snapshot(fund_codes):
     return latest_nav_map
 
 
+def _get_fund_name_map(fund_codes: list[str]) -> dict[str, str | None]:
+    """读取基金名称，单只失败时返回空名称而不影响整体看板。"""
+    if not fund_codes:
+        return {}
+
+    fund_name_map: dict[str, str | None] = {}
+    for fund_code in fund_codes:
+        try:
+            fund_info = dca_fund_fetcher.get_fund_info(fund_code)
+            fund_name = str(fund_info.get("name", "")).strip() or None
+        except Exception as e:
+            print(f"Warning: failed to fetch fund name for {fund_code}: {e}")
+            fund_name = None
+        fund_name_map[fund_code] = fund_name
+
+    return fund_name_map
+
+
 def _empty_dca_snapshot():
     """返回空的定投看板数据结构。"""
     return {
@@ -381,6 +401,7 @@ def _get_dca_snapshot():
 
     fund_codes = sorted({row["fund_code"] for row in rows})
     latest_nav_map = _get_latest_nav_snapshot(fund_codes)
+    fund_name_map = _get_fund_name_map(fund_codes)
 
     fund_metrics = {}
     records = []
@@ -404,6 +425,7 @@ def _get_dca_snapshot():
 
         fund = fund_metrics.setdefault(row["fund_code"], {
             "fund_code": row["fund_code"],
+            "fund_name": fund_name_map.get(row["fund_code"]),
             "start_date": row["trade_date"],
             "confirmed_amount": 0.0,
             "pending_amount": 0.0,
@@ -411,6 +433,8 @@ def _get_dca_snapshot():
             "record_count": 0,
             "pending_count": 0,
         })
+        if fund.get("fund_name") is None:
+            fund["fund_name"] = fund_name_map.get(row["fund_code"])
         fund["start_date"] = min(fund["start_date"], row["trade_date"])
         fund["record_count"] += 1
 
@@ -441,6 +465,7 @@ def _get_dca_snapshot():
 
         funds.append({
             "fund_code": fund_code,
+            "fund_name": fund.get("fund_name"),
             "start_date": fund["start_date"],
             "latest_nav": latest_nav,
             "latest_nav_date": latest_nav_date,
@@ -704,6 +729,59 @@ def _friendly_nav_estimator_error_message(error: Exception) -> str:
     return f"净值估算失败: {message}"
 
 
+def _validate_dca_estimates_payload(data: dict) -> list[str]:
+    """校验定投看板实时估值请求体。"""
+    if not isinstance(data, dict):
+        raise ValueError("请求体必须是 JSON 对象")
+
+    raw_codes = data.get("fund_codes", [])
+    if raw_codes is None:
+        return []
+    if not isinstance(raw_codes, (list, tuple, set)):
+        raise ValueError("fund_codes 必须是数组")
+
+    normalized_codes = []
+    seen = set()
+    for raw_code in raw_codes:
+        code = str(raw_code).strip()
+        if not code:
+            continue
+        if not FUND_CODE_PATTERN.fullmatch(code):
+            raise ValueError(f"基金代码格式非法: {code}")
+        if code in seen:
+            continue
+        seen.add(code)
+        normalized_codes.append(code)
+    return normalized_codes
+
+
+def _build_dca_estimates_response(fund_codes: list[str], strict: bool = True) -> dict:
+    """将净值估算结果收敛为定投卡片专用结构。"""
+    if not fund_codes:
+        return {"strict_mode": strict, "results": []}
+
+    raw_payload = _estimate_navs(fund_codes, strict)
+    raw_results = raw_payload.get("results", [])
+
+    results = []
+    for item in raw_results:
+        is_failed = item.get("status") == "失败"
+        results.append({
+            "fund_code": item.get("fund_code"),
+            "status": "failed" if is_failed else "success",
+            "estimated_nav": item.get("estimated_nav"),
+            "estimated_return": item.get("estimated_return"),
+            "nav_date": item.get("nav_date"),
+            "message": "严格模式暂不可用" if is_failed else None,
+            "warnings": item.get("warnings") or [],
+        })
+
+    return {
+        "strict_mode": strict,
+        "results": results,
+    }
+
+
 # ===== 路由 =====
 
 @app.route("/")
@@ -858,6 +936,26 @@ def api_dca_portfolio():
         import traceback
         traceback.print_exc()
         return jsonify({"error": f"读取定投看板失败: {str(e)}"}), 500
+
+
+@app.route("/api/dca/estimates", methods=["POST"])
+def api_dca_estimates():
+    """获取定投看板卡片使用的实时净值估算结果。"""
+    data = request.get_json(silent=True)
+    if data is None:
+        data = {}
+
+    try:
+        fund_codes = _validate_dca_estimates_payload(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    try:
+        return jsonify(_build_dca_estimates_response(fund_codes, strict=True))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": _friendly_nav_estimator_error_message(e)}), 500
 
 
 @app.route("/api/dca/records", methods=["POST"])

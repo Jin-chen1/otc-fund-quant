@@ -386,6 +386,66 @@
             color: var(--accent-cyan);
         }
 
+        .fund-name {
+            color: var(--text-secondary);
+            font-size: 12px;
+            line-height: 1.45;
+            max-width: 280px;
+            word-break: break-word;
+        }
+
+        .fund-head-side {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            align-items: flex-end;
+            min-width: 150px;
+        }
+
+        .pending-summary {
+            display: inline-flex;
+            align-items: baseline;
+            gap: 6px;
+            color: var(--text-secondary);
+            font-size: 11px;
+            line-height: 1.4;
+        }
+
+        .pending-summary strong {
+            color: var(--accent-hold);
+            font-size: 14px;
+            font-weight: 700;
+        }
+
+        .estimate-box {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 4px;
+            padding: 10px 12px;
+            min-width: 150px;
+            border-radius: 12px;
+            background: rgba(10, 14, 23, 0.44);
+            border: 1px solid rgba(56, 189, 248, 0.08);
+        }
+
+        .estimate-label {
+            color: var(--text-muted);
+            font-size: 11px;
+            letter-spacing: 0.6px;
+        }
+
+        .estimate-value {
+            color: var(--text-primary);
+            font-size: 16px;
+            font-weight: 700;
+        }
+
+        .estimate-sub {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
         .status-pill {
             display: inline-flex;
             align-items: center;
@@ -553,6 +613,13 @@
                 flex-direction: column;
                 align-items: flex-start;
             }
+
+            .fund-head-side,
+            .estimate-box {
+                align-items: flex-start;
+                min-width: 0;
+                width: 100%;
+            }
         }
     </style>
 </head>
@@ -676,6 +743,8 @@
 let deletingRecordId = null;
 let lastSnapshot = { records: [] };
 let isSubmitting = false;
+let estimateMap = {};
+let estimateRequestSeq = 0;
 
 function localTodayString() {
     const now = new Date();
@@ -727,6 +796,11 @@ function profitClass(value) {
     return Number(value) > 0 ? 'positive-text' : 'negative-text';
 }
 
+function estimateClass(value) {
+    if (value === null || value === undefined || Number.isNaN(Number(value)) || Number(value) === 0) return 'neutral-text';
+    return Number(value) > 0 ? 'positive-text' : 'negative-text';
+}
+
 function setMessage(text, type = 'error') {
     const box = document.getElementById('message-box');
     box.textContent = text;
@@ -737,6 +811,66 @@ function clearMessage() {
     const box = document.getElementById('message-box');
     box.textContent = '';
     box.className = 'message hidden';
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+}
+
+function uniqueFundCodes(funds) {
+    const seen = new Set();
+    const codes = [];
+    for (const fund of funds || []) {
+        const code = String(fund?.fund_code || '').trim();
+        if (!/^\d{6}$/.test(code) || seen.has(code)) {
+            continue;
+        }
+        seen.add(code);
+        codes.push(code);
+    }
+    return codes;
+}
+
+function renderEstimateBox(fundCode) {
+    const estimate = estimateMap[fundCode];
+    if (!estimate || estimate.status === 'loading') {
+        return `
+            <div class="estimate-box">
+                <div class="estimate-label">实时估值</div>
+                <div class="estimate-value mono">--</div>
+                <div class="estimate-sub">加载中...</div>
+            </div>
+        `;
+    }
+
+    if (estimate.status === 'success') {
+        const estimateNav = estimate.estimated_nav === null || estimate.estimated_nav === undefined
+            ? '--'
+            : fmtNav(estimate.estimated_nav);
+        const estimateReturnText = fmtPct(estimate.estimated_return);
+        const estimateReturnClass = estimateClass(estimate.estimated_return);
+        return `
+            <div class="estimate-box">
+                <div class="estimate-label">实时估值</div>
+                <div class="estimate-value mono">${estimateNav}</div>
+                <div class="estimate-sub mono ${estimateReturnClass}">${estimateReturnText}</div>
+            </div>
+        `;
+    }
+
+    const message = escapeHtml(estimate.message || '严格模式暂不可用');
+    return `
+        <div class="estimate-box">
+            <div class="estimate-label">实时估值</div>
+            <div class="estimate-value mono">--</div>
+            <div class="estimate-sub">${message}</div>
+        </div>
+    `;
 }
 
 function setSubmitLoading(loading) {
@@ -816,23 +950,32 @@ function renderFunds(funds) {
     container.innerHTML = funds.map(fund => {
         const tone = fund.profit_amount > 0 ? 'positive' : fund.profit_amount < 0 ? 'negative' : '';
         const profitTone = profitClass(fund.profit_amount);
+        const fundCode = escapeHtml(fund.fund_code || '--');
+        const fundName = fund.fund_name ? escapeHtml(fund.fund_name) : '';
         const navText = fund.latest_nav_date
             ? `${fund.latest_nav_date} / ${fmtNav(fund.latest_nav)}`
             : '暂无净值';
+        const estimateHtml = renderEstimateBox(fund.fund_code);
         const stateBadge = fund.pending_count > 0
             ? statusBadge('pending', fund.pending_count)
             : statusBadge('confirmed');
+        const pendingSummaryHtml = fund.pending_count > 0
+            ? `<div class="pending-summary"><span>累计待确认</span><strong class="mono">${fmtMoney(fund.pending_amount)}</strong></div>`
+            : '';
 
         return `
             <div class="fund-card ${tone}">
                 <div class="fund-head">
                     <div class="fund-title">
-                        <strong class="mono">${fund.fund_code}</strong>
+                        <strong class="mono">${fundCode}</strong>
+                        ${fundName ? `<div class="fund-name" title="${fundName}">${fundName}</div>` : ''}
                         <div class="muted" style="font-size: 12px;">定投起始 ${fund.start_date}</div>
                     </div>
-                    <div style="display: flex; flex-direction: column; gap: 8px; align-items: flex-end;">
+                    <div class="fund-head-side">
                         ${stateBadge}
+                        ${pendingSummaryHtml}
                         <div class="mono muted" style="font-size: 11px;">${navText}</div>
+                        ${estimateHtml}
                     </div>
                 </div>
                 <div class="profit-panel">
@@ -919,6 +1062,61 @@ function renderAll(data) {
     renderRecords(data.records || []);
 }
 
+async function loadEstimates(funds) {
+    const fundCodes = uniqueFundCodes(funds);
+    const requestSeq = ++estimateRequestSeq;
+
+    if (fundCodes.length === 0) {
+        estimateMap = {};
+        renderFunds(lastSnapshot.funds || []);
+        return;
+    }
+
+    estimateMap = Object.fromEntries(fundCodes.map(code => [code, { status: 'loading' }]));
+    renderFunds(lastSnapshot.funds || []);
+
+    try {
+        const resp = await fetch('/api/dca/estimates', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fund_codes: fundCodes }),
+        });
+        const data = await resp.json();
+        if (requestSeq !== estimateRequestSeq) {
+            return;
+        }
+
+        if (!resp.ok) {
+            estimateMap = Object.fromEntries(
+                fundCodes.map(code => [code, { status: 'failed', message: '实时估值暂不可用' }])
+            );
+            renderFunds(lastSnapshot.funds || []);
+            return;
+        }
+
+        const nextMap = Object.fromEntries(
+            fundCodes.map(code => [code, { status: 'failed', message: '严格模式暂不可用' }])
+        );
+        for (const item of data.results || []) {
+            const code = String(item.fund_code || '').trim();
+            if (!code) {
+                continue;
+            }
+            nextMap[code] = item;
+        }
+        estimateMap = nextMap;
+        renderFunds(lastSnapshot.funds || []);
+    } catch (e) {
+        if (requestSeq !== estimateRequestSeq) {
+            return;
+        }
+        estimateMap = Object.fromEntries(
+            fundCodes.map(code => [code, { status: 'failed', message: '实时估值暂不可用' }])
+        );
+        renderFunds(lastSnapshot.funds || []);
+    }
+}
+
 async function loadPortfolio() {
     try {
         const resp = await fetch('/api/dca/portfolio');
@@ -927,7 +1125,9 @@ async function loadPortfolio() {
             setMessage(data.error || '读取定投看板失败');
             return;
         }
+        estimateMap = {};
         renderAll(data);
+        loadEstimates(data.funds || []);
     } catch (e) {
         setMessage('网络错误: ' + e.message);
     }
