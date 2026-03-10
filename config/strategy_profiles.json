@@ -1,0 +1,184 @@
+{
+  "version": 2,
+  "strategy_defaults": {
+    "v6": {
+      "max_position_ratio": 0.8,
+      "soft_stop_loss": -0.18,
+      "hard_stop_loss": -0.25,
+      "min_cooldown": 8,
+      "max_cooldown": 25,
+      "dca_base_ratio": 0.04,
+      "dca_interval": 7,
+      "cheap_percentile": 0.2,
+      "batch_interval": 3,
+      "min_history_days": 250,
+      "trend_batch_ratios": [0.2, 0.15, 0.15],
+      "re_entry_strong_ratio": 0.85,
+      "re_entry_weak_ratio": 0.65,
+      "low_position_ratio": 0.3,
+      "rsi_sell_threshold": 70
+    },
+    "regime_adaptive": {
+      "max_position_ratio": 0.8,
+      "soft_stop_loss": -0.18,
+      "hard_stop_loss": -0.25,
+      "min_cooldown": 8,
+      "max_cooldown": 25,
+      "dca_base_ratio": 0.04,
+      "dca_interval": 7,
+      "cheap_percentile": 0.2,
+      "batch_interval": 3,
+      "min_history_days": 250,
+      "trend_batch_ratios": [0.2, 0.15, 0.15],
+      "re_entry_strong_ratio": 0.85,
+      "re_entry_weak_ratio": 0.65,
+      "low_position_ratio": 0.3,
+      "rsi_sell_threshold": 70,
+      "adx_trend_threshold": 25,
+      "bull_dca_boost": 1.5,
+      "transition_buy_ratio": 0.15,
+      "transition_sell_ratio": 0.3
+    },
+    "index_momentum": {
+      "max_position_ratio": 0.95,
+      "soft_stop_loss": -0.2,
+      "hard_stop_loss": -0.3,
+      "min_cooldown": 5,
+      "max_cooldown": 15,
+      "dca_base_ratio": 0.08,
+      "dca_oversold_interval": 3,
+      "dca_normal_interval": 5,
+      "min_history_days": 60,
+      "momentum_buy_threshold": 2,
+      "rsi_overbought": 75,
+      "atr_scale_max": 2.0,
+      "low_position_ratio": 0.3,
+      "batch_interval": 3,
+      "trend_batch_ratios": [0.25, 0.2, 0.15],
+      "tail_size": 200,
+      "percentile_window": 150
+    }
+  },
+  "profiles": {
+    "equity_active_cn": {
+      "label": "A股主动权益",
+      "description": "主动权益基金默认画像",
+      "default_strategy": "regime_adaptive",
+      "allowed_strategies": ["v6", "regime_adaptive"],
+      "strategy_params": {
+        "v6": {},
+        "regime_adaptive": {}
+      }
+    },
+    "equity_active_hk": {
+      "label": "港股主动权益",
+      "description": "港股主动权益默认画像",
+      "default_strategy": "regime_adaptive",
+      "allowed_strategies": ["v6", "regime_adaptive"],
+      "strategy_params": {
+        "v6": {},
+        "regime_adaptive": {}
+      }
+    },
+    "equity_index_cn": {
+      "label": "A股指数",
+      "description": "A股指数/ETF联接默认画像",
+      "default_strategy": "index_momentum",
+      "allowed_strategies": ["v6", "regime_adaptive", "index_momentum"],
+      "strategy_params": {
+        "v6": {},
+        "regime_adaptive": {},
+        "index_momentum": {}
+      }
+    },
+    "equity_index_hk": {
+      "label": "港股指数",
+      "description": "港股指数默认画像",
+      "default_strategy": "regime_adaptive",
+      "allowed_strategies": ["v6", "regime_adaptive"],
+      "strategy_params": {
+        "v6": {},
+        "regime_adaptive": {}
+      }
+    },
+    "bond_pure": {
+      "label": "纯债",
+      "description": "纯债基金保守画像",
+      "default_strategy": "v6",
+      "allowed_strategies": ["v6"],
+      "strategy_params": {
+        "v6": {}
+      }
+    },
+    "bond_plus": {
+      "label": "固收+",
+      "description": "固收+基金保守画像",
+      "default_strategy": "v6",
+      "allowed_strategies": ["v6"],
+      "strategy_params": {
+        "v6": {}
+      }
+    },
+    "qdii_global": {
+      "label": "QDII",
+      "description": "QDII基金默认画像",
+      "default_strategy": "v6",
+      "allowed_strategies": ["v6"],
+      "strategy_params": {
+        "v6": {}
+      }
+    }
+  },
+  "fund_type_profiles": {
+    "active_a": "equity_active_cn",
+    "active_hk": "equity_active_hk",
+    "index_a": "equity_index_cn",
+    "index_hk": "equity_index_hk",
+    "bond_pure": "bond_pure",
+    "bond_plus": "bond_plus",
+    "qdii": "qdii_global"
+  },
+  "fund_overrides": {
+    "022464": {
+      "strategy_params": {
+        "v6": {
+          "max_position_ratio": 0.85,
+          "soft_stop_loss": -0.2,
+          "hard_stop_loss": -0.28,
+          "min_cooldown": 6,
+          "max_cooldown": 20,
+          "dca_base_ratio": 0.05,
+          "dca_interval": 5,
+          "cheap_percentile": 0.25,
+          "min_history_days": 120,
+          "trend_batch_ratios": [0.22, 0.18, 0.15],
+          "rsi_sell_threshold": 75,
+          "tail_size": 200,
+          "percentile_window": 150,
+          "rsi_buy_low": 30,
+          "rsi_buy_high": 70,
+          "rsi_extreme_overbought": 85
+        },
+        "regime_adaptive": {
+          "adx_trend_threshold": 22,
+          "bull_dca_boost": 1.8,
+          "transition_buy_ratio": 0.18,
+          "transition_sell_ratio": 0.25
+        },
+        "index_momentum": {
+          "max_position_ratio": 0.97,
+          "dca_base_ratio": 0.08,
+          "dca_normal_interval": 4,
+          "dca_oversold_interval": 2,
+          "momentum_buy_threshold": 2,
+          "rsi_overbought": 93,
+          "atr_scale_max": 2.5,
+          "min_cooldown": 4,
+          "max_cooldown": 12,
+          "batch_interval": 1,
+          "trend_batch_ratios": [0.97]
+        }
+      }
+    }
+  }
+}

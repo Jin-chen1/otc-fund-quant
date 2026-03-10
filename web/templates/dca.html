@@ -166,7 +166,8 @@
             gap: 18px;
         }
 
-        .hero-note {
+        .hero-note,
+        .hero-side {
             display: flex;
             flex-direction: column;
             gap: 10px;
@@ -186,15 +187,26 @@
             font-weight: 600;
         }
 
+        .hero-title {
+            font-size: 30px;
+            line-height: 1.2;
+            font-weight: 700;
+        }
+
+        .hero-copy {
+            color: var(--text-secondary);
+            font-size: 14px;
+            line-height: 1.9;
+            max-width: 760px;
+        }
+
         .hero-side {
-            background: var(--bg-card-soft);
-            border: 1px solid rgba(56, 189, 248, 0.08);
-            border-radius: 12px;
-            padding: 18px;
-            display: flex;
-            flex-direction: column;
             justify-content: center;
-            gap: 10px;
+            min-width: 0;
+        }
+
+        .hero-side .hero-copy {
+            max-width: none;
         }
 
         .section {
@@ -649,17 +661,17 @@
     <section class="card hero">
         <div class="hero-note">
             <span class="hero-chip">手动定投录入</span>
-            <h1 style="font-size: 30px; line-height: 1.2;">录入或补录买入金额，系统按下一可用净值确认份额，并持续计算当前盈利百分比。</h1>
-            <p style="color: var(--text-secondary); font-size: 14px; line-height: 1.9; max-width: 760px;">
+            <h1 class="hero-title">录入或补录买入金额，系统按下一可用净值确认份额，并持续计算当前盈利百分比。</h1>
+            <p class="hero-copy">
                 页面汇总口径按基金聚合。周末或节假日录入会自动顺延到下一有净值日确认，未确认金额会单独列出，不提前计入收益。
             </p>
         </div>
         <div class="hero-side">
-            <div class="muted" style="font-size: 12px;">确认规则</div>
-            <div style="font-size: 18px; font-weight: 700;">trade_date 之后首个净值日</div>
-            <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.8;">
+            <span class="hero-chip">确认规则</span>
+            <h2 class="hero-title">交易日之后首个净值日</h2>
+            <p class="hero-copy">
                 买入日期默认今天，也可以手动补录历史日期。份额确认后，当前价值按该基金最新可用净值滚动更新。
-            </div>
+            </p>
         </div>
     </section>
 
@@ -834,6 +846,12 @@ function uniqueFundCodes(funds) {
         codes.push(code);
     }
     return codes;
+}
+
+function setEstimateFailureState(fundCodes, message) {
+    estimateMap = Object.fromEntries(
+        fundCodes.map(code => [code, { status: 'failed', message }])
+    );
 }
 
 function renderEstimateBox(fundCode) {
@@ -1087,9 +1105,8 @@ async function loadEstimates(funds) {
         }
 
         if (!resp.ok) {
-            estimateMap = Object.fromEntries(
-                fundCodes.map(code => [code, { status: 'failed', message: '实时估值暂不可用' }])
-            );
+            const message = String(data?.error || '实时估值请求失败，请刷新重试');
+            setEstimateFailureState(fundCodes, message);
             renderFunds(lastSnapshot.funds || []);
             return;
         }
@@ -1110,9 +1127,7 @@ async function loadEstimates(funds) {
         if (requestSeq !== estimateRequestSeq) {
             return;
         }
-        estimateMap = Object.fromEntries(
-            fundCodes.map(code => [code, { status: 'failed', message: '实时估值暂不可用' }])
-        );
+        setEstimateFailureState(fundCodes, '实时估值请求中断，请刷新重试');
         renderFunds(lastSnapshot.funds || []);
     }
 }

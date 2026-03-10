@@ -12,6 +12,7 @@ from ..core.batch_context import BatchContext
 from ..core.quality_gate import build_quality_metadata
 from ..data.fetcher.fund_fetcher import FundFetcher
 from ..data.fetcher.index_fetcher import IndexFetcher
+from ..data.fetcher.stock_fetcher import StockFetcher
 from .base_estimator import BaseEstimator
 
 
@@ -21,6 +22,52 @@ class IndexEstimator(BaseEstimator):
     def __init__(self):
         self.index_fetcher = IndexFetcher()
         self.fund_fetcher = FundFetcher()
+        self.stock_fetcher = StockFetcher()
+
+    @staticmethod
+    def _append_used_source(used_sources: dict[str, Any], category: str, source: str | None, item_code: str | None = None):
+        if source is None:
+            return
+        bucket = used_sources.setdefault(category, {})
+        if item_code is not None:
+            bucket[str(item_code)] = source
+            return
+        bucket[source] = bucket.get(source, 0) + 1
+
+    @staticmethod
+    def _merge_live_source_meta(
+        *,
+        used_sources: dict[str, Any],
+        source_disagreements: list[str],
+        category: str,
+        payload: dict[str, Any],
+        item_code: str | None = None,
+    ):
+        IndexEstimator._append_used_source(used_sources, category, payload.get("source"), item_code=item_code)
+        source_disagreements.extend(payload.get("source_disagreements", []))
+
+    @staticmethod
+    def _build_batch_tracking_payload(change_pct: float, data_as_of_date: str | None) -> dict[str, Any]:
+        return {
+            "value": float(change_pct),
+            "source": "batch_prefetch",
+            "source_priority": 1,
+            "raw": {"change_pct": float(change_pct)},
+            "warnings": [],
+            "source_disagreements": [],
+            "data_as_of_date": data_as_of_date or date.today().isoformat(),
+        }
+
+    @staticmethod
+    def _resolve_tracking_target_payload(index_code: str | None, tracking_target: dict[str, Any] | None) -> dict[str, Any]:
+        payload = dict(tracking_target or {})
+        target_type = str(payload.get("target_type", "a_index")).strip() or "a_index"
+        resolved_code = str(payload.get("code") or payload.get("security_code") or index_code or "").strip()
+        if resolved_code == "":
+            raise ValueError("指数基金缺少有效跟踪标的代码")
+        payload["target_type"] = target_type
+        payload["resolved_code"] = resolved_code
+        return payload
 
     def _resolve_default_position(self, fund_code: str, fund_info: dict[str, Any] | None) -> tuple[float, str, dict[str, Any]]:
         resolved_fund_info = fund_info
@@ -92,6 +139,7 @@ class IndexEstimator(BaseEstimator):
         index_code: str,
         target_date: str | None = None,
         fund_info: dict[str, Any] | None = None,
+        tracking_target: dict[str, Any] | None = None,
         position: float | None = None,
         mgmt_rate: float | None = None,
         custody_rate: float | None = None,
@@ -105,6 +153,9 @@ class IndexEstimator(BaseEstimator):
         warnings: list[str] = []
         used_sources: dict[str, Any] = {}
         source_disagreements: list[str] = []
+        resolved_tracking_target = self._resolve_tracking_target_payload(index_code, tracking_target)
+        tracking_target_type = str(resolved_tracking_target["target_type"])
+        tracking_code = str(resolved_tracking_target["resolved_code"])
         if mgmt_rate is None:
             mgmt_rate = DEFAULT_FEES["index"]["management"]
         if custody_rate is None:
@@ -141,6 +192,8 @@ class IndexEstimator(BaseEstimator):
                 is_index_enhanced_fund = self.fund_fetcher.is_index_enhanced_fund(fund_info)
 
             if is_index_enhanced_fund:
+                if tracking_target_type != "a_index":
+                    raise ValueError(f"基金 {fund_code} 的联接ETF跟踪标的不支持指数增强回归校准")
                 lookback_days = int(INDEX_ENHANCED_REGRESSION["lookback_days"])
                 min_samples = int(INDEX_ENHANCED_REGRESSION["min_samples"])
                 beta_min = float(INDEX_ENHANCED_REGRESSION["beta_min"])
@@ -149,7 +202,7 @@ class IndexEstimator(BaseEstimator):
                 try:
                     regression_df = self._build_regression_dataset(
                         fund_code=fund_code,
-                        index_code=index_code,
+                        index_code=tracking_code,
                         lookback_days=lookback_days,
                         mgmt_rate=mgmt_rate,
                         custody_rate=custody_rate,
@@ -186,28 +239,77 @@ class IndexEstimator(BaseEstimator):
 
         nav_date_resolved, target_date_resolved, fee_days = self.resolve_fee_days(nav_date, target_date)
         index_data_as_of_date = (
-            (batch_context.a_index_as_of_dates.get(index_code) if batch_context is not None and index_code in batch_context.a_index_as_of_dates else batch_context.data_as_of_date)
+            (
+                (
+                    batch_context.a_index_as_of_dates.get(tracking_code)
+                    if tracking_target_type == "a_index" and tracking_code in batch_context.a_index_as_of_dates
+                    else batch_context.a_price_as_of_dates.get(tracking_code)
+                    if tracking_target_type == "linked_etf_a_share" and tracking_code in batch_context.a_price_as_of_dates
+                    else batch_context.data_as_of_date
+                )
+                if batch_context is not None
+                else None
+            )
             if batch_context is not None
             else date.today().isoformat()
         )
 
         try:
-            if strict:
-                index_payload = self.index_fetcher.get_a_index_return_live(index_code, strict=True)
-                used_sources = {"a_index": {index_code: index_payload.get("source")}}
-                source_disagreements = list(index_payload.get("source_disagreements", []))
+            if tracking_target_type == "linked_etf_a_share":
+                if strict:
+                    tracking_payload = self.stock_fetcher.get_a_share_quote_live(tracking_code, strict=True)
+                elif batch_context is not None and tracking_code in batch_context.a_prices:
+                    tracking_payload = self._build_batch_tracking_payload(
+                        batch_context.a_prices[tracking_code]["change_pct"],
+                        batch_context.a_price_as_of_dates.get(tracking_code) or batch_context.data_as_of_date,
+                    )
+                else:
+                    if batch_context is not None and batch_context.a_prices_error is not None:
+                        logger.warning(
+                            f"批次联接ETF {tracking_code} 行情不可用，非严格模式下转为即时获取: {batch_context.a_prices_error}"
+                        )
+                    tracking_payload = self.stock_fetcher.get_a_share_quote_live(tracking_code, strict=False)
+                self._merge_live_source_meta(
+                    used_sources=used_sources,
+                    source_disagreements=source_disagreements,
+                    category="tracking_targets",
+                    payload=tracking_payload,
+                    item_code=tracking_code,
+                )
+                r_index = float(tracking_payload["value"])
+                index_data_as_of_date = tracking_payload.get("data_as_of_date") or index_data_as_of_date
+            else:
+                if strict:
+                    index_payload = self.index_fetcher.get_a_index_return_live(tracking_code, strict=True)
+                elif batch_context is not None and tracking_code in batch_context.a_index_returns:
+                    index_payload = self._build_batch_tracking_payload(
+                        batch_context.a_index_returns[tracking_code],
+                        batch_context.a_index_as_of_dates.get(tracking_code) or batch_context.data_as_of_date,
+                    )
+                else:
+                    if batch_context is not None and tracking_code in batch_context.a_index_errors:
+                        logger.warning(
+                            f"批次A股指数 {tracking_code} 不可用，非严格模式下转为即时获取: {batch_context.a_index_errors[tracking_code]}"
+                        )
+                    best_effort_return = self.index_fetcher.get_a_index_return(tracking_code)
+                    index_payload = {
+                        "value": best_effort_return,
+                        "source": "best_effort",
+                        "source_priority": 1,
+                        "raw": {"change_pct": best_effort_return},
+                        "warnings": [],
+                        "source_disagreements": [],
+                        "data_as_of_date": index_data_as_of_date,
+                    }
+                self._merge_live_source_meta(
+                    used_sources=used_sources,
+                    source_disagreements=source_disagreements,
+                    category="tracking_targets",
+                    payload=index_payload,
+                    item_code=tracking_code,
+                )
                 r_index = float(index_payload["value"])
                 index_data_as_of_date = index_payload.get("data_as_of_date") or index_data_as_of_date
-            elif batch_context is not None:
-                if index_code in batch_context.a_index_returns:
-                    r_index = batch_context.a_index_returns[index_code]
-                elif index_code in batch_context.a_index_errors:
-                    logger.warning(f"批次A股指数 {index_code} 不可用，非严格模式下转为即时获取: {batch_context.a_index_errors[index_code]}")
-                    r_index = self.index_fetcher.get_a_index_return(index_code)
-                else:
-                    r_index = self.index_fetcher.get_a_index_return(index_code)
-            else:
-                r_index = self.index_fetcher.get_a_index_return(index_code)
         except Exception as e:
             logger.error(f"获取指数行情失败: {e}")
             raise
@@ -224,7 +326,7 @@ class IndexEstimator(BaseEstimator):
             "fee_days": fee_days,
             "estimated_nav": est_nav,
             "estimated_return": r_t * 100,
-            "index_code": index_code,
+            "index_code": tracking_code,
             "index_return": r_index,
             "position": position,
             "position_source": position_source,

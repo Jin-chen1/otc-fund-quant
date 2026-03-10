@@ -272,7 +272,7 @@
                 <h1 style="font-size: 17px; font-weight: 700; letter-spacing: 0.5px;">
                     基金分析终端
                 </h1>
-                <span id="nav-strategy-label" class="mono" style="font-size: 12px; color: var(--text-muted); margin-left: 4px;">V6</span>
+                <span id="nav-strategy-label" class="mono" style="font-size: 12px; color: var(--text-muted); margin-left: 4px;">AUTO</span>
             </div>
             <div style="display: flex; align-items: center; gap: 8px;">
                 <a href="/" style="padding: 7px 14px; border-radius: 999px; border: 1px solid var(--accent-cyan); background: rgba(56, 189, 248, 0.08); color: var(--accent-cyan); text-decoration: none; font-size: 12px;">分析终端</a>
@@ -308,10 +308,8 @@
         <!-- 策略切换 -->
         <div style="margin-top: 16px; display: flex; align-items: center; gap: 8px;">
             <span style="font-size: 12px; color: var(--text-muted); margin-right: 4px;">策略</span>
-            <button id="tab-v6" onclick="switchStrategy('v6')" class="strategy-tab active">V6 估值趋势</button>
-            <button id="tab-regime" onclick="switchStrategy('regime_adaptive')" class="strategy-tab">状态自适应</button>
-            <button id="tab-index-mom" onclick="switchStrategy('index_momentum')" class="strategy-tab" style="display:none;">指数动量</button>
-            <span id="strategy-hint" style="font-size: 11px; color: var(--text-muted); margin-left: 8px;">切换后自动重新分析</span>
+            <div id="strategy-tabs" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;"></div>
+            <span id="strategy-hint" style="font-size: 11px; color: var(--text-muted); margin-left: 8px;">首次分析后显示可用策略</span>
         </div>
         <!-- 策略简介 -->
         <div id="strategy-desc" style="margin-top: 12px; padding: 10px 14px; background: rgba(56,189,248,0.04); border: 1px solid var(--border-primary); border-radius: 8px; font-size: 12px; color: var(--text-secondary); line-height: 1.7;"></div>
@@ -422,60 +420,87 @@
 <script>
 // ===== 全局状态 =====
 let currentData = null;
-let currentStrategy = 'v6';
+let currentStrategy = '';
+let currentStrategyCatalog = [];
 let _abortController = null;
+let _periodReturnsPollTimer = null;
+let _analysisToken = 0;
+let _pendingPeriodReturnsContext = null;
+let _isAnalyzeLoading = false;
+const DEFAULT_STRATEGY_HINT = '首次分析后显示可用策略';
+const PERIOD_RETURNS_FAST_INTERVAL_MS = 2000;
+const PERIOD_RETURNS_SLOW_INTERVAL_MS = 5000;
+const PERIOD_RETURNS_SLOW_THRESHOLD_MS = 60000;
 
-const STRATEGY_DESC = {
-    'v6': '基于估值百分位 + 趋势信号的混合策略。在低估值区间（百分位<20%）叠加 MA 金叉、RSI 超卖等技术信号触发买入，高 RSI 或死叉触发卖出。含 DCA 定投（4%/7天/低估加码）、8~25天冷却期、止损机制。',
-    'regime_adaptive': '基于 ADX 判断市场状态（趋势/震荡），动态切换交易逻辑。趋势市顺势操作（牛市宽松买入、熊市严格止损），震荡市采用区间策略（低买高卖）。融合估值百分位 + RSI + MACD + ATR 波动率自适应仓位管理。',
-    'index_momentum': '专为指数ETF设计。用布林带替代百分位估值（仅需20日数据），6维动量评分驱动批量建仓（5日/10日/20日动量+MA20+MACD+下轨反弹），正常区定期DCA兜底，ATR自适应仓位管理。超卖区加速定投、超买区暂停买入。适合短历史、高流动性的宽基指数基金。'
-};
+function getStrategyMeta(strategy) {
+    return currentStrategyCatalog.find(item => item.id === strategy) || null;
+}
 
-function updateStrategyDesc(strategy) {
-    document.getElementById('strategy-desc').textContent = STRATEGY_DESC[strategy] || '';
+function updateStrategyDesc(strategyMeta) {
+    document.getElementById('strategy-desc').textContent = strategyMeta?.description || '';
+}
+
+function renderStrategyTabs(availableStrategies, activeStrategy) {
+    currentStrategyCatalog = Array.isArray(availableStrategies) ? [...availableStrategies] : [];
+    const container = document.getElementById('strategy-tabs');
+    container.innerHTML = '';
+
+    currentStrategyCatalog.forEach((strategyMeta) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'strategy-tab' + (strategyMeta.id === activeStrategy ? ' active' : '');
+        btn.textContent = strategyMeta.label;
+        btn.addEventListener('click', () => switchStrategy(strategyMeta.id));
+        container.appendChild(btn);
+    });
+}
+
+function applyStrategyContext(strategyContext, fallbackStrategy) {
+    const activeStrategy = strategyContext?.effective_strategy || fallbackStrategy || currentStrategy || '';
+    currentStrategy = activeStrategy;
+    renderStrategyTabs(strategyContext?.available_strategies, activeStrategy);
+
+    const activeMeta = getStrategyMeta(activeStrategy);
+    document.getElementById('nav-strategy-label').textContent = activeMeta?.label || activeStrategy || 'AUTO';
+    updateStrategyDesc(activeMeta);
+
+    let hint = DEFAULT_STRATEGY_HINT;
+    if (strategyContext?.adjustment_reason) {
+        hint = strategyContext.adjustment_reason;
+    } else if (strategyContext?.profile_label) {
+        hint = `画像: ${strategyContext.profile_label}`;
+    }
+    document.getElementById('strategy-hint').textContent = hint;
 }
 
 // ===== 策略切换 =====
 function switchStrategy(strategy) {
     if (strategy === currentStrategy) return;
     currentStrategy = strategy;
-
-    document.querySelectorAll('.strategy-tab').forEach(btn => btn.classList.remove('active'));
-    const tabMap = { 'v6': 'tab-v6', 'regime_adaptive': 'tab-regime', 'index_momentum': 'tab-index-mom' };
-    document.getElementById(tabMap[strategy]).classList.add('active');
-
-    const strategyNames = { 'v6': 'V6', 'regime_adaptive': 'REGIME', 'index_momentum': 'MOMENTUM' };
-    document.getElementById('nav-strategy-label').textContent = strategyNames[strategy] || strategy;
-    updateStrategyDesc(strategy);
+    renderStrategyTabs(currentStrategyCatalog, currentStrategy);
+    const activeMeta = getStrategyMeta(strategy);
+    document.getElementById('nav-strategy-label').textContent = activeMeta?.label || strategy;
+    updateStrategyDesc(activeMeta);
+    document.getElementById('strategy-hint').textContent = '切换后自动重新分析';
+    syncAnalyzeButtonState();
 
     const code = document.getElementById('fund-code').value.trim();
     if (code) analyzeFund();
 }
 
-// ===== 指数动量策略tab可见性控制 =====
-const INDEX_MOMENTUM_FUNDS = ['022464'];
-function updateIndexMomTabVisibility() {
-    const code = document.getElementById('fund-code').value.trim();
-    const tab = document.getElementById('tab-index-mom');
-    const show = INDEX_MOMENTUM_FUNDS.includes(code);
-    tab.style.display = show ? '' : 'none';
-    // 如果当前选中的是指数动量但基金不支持，自动切回 v6
-    if (!show && currentStrategy === 'index_momentum') {
-        switchStrategy('v6');
-    }
-}
-document.getElementById('fund-code').addEventListener('input', updateIndexMomTabVisibility);
-
 // ===== 分析基金 =====
 async function analyzeFund() {
     const code = document.getElementById('fund-code').value.trim();
     if (!code) { showError('请输入基金代码'); return; }
-    updateIndexMomTabVisibility();
+    if (isPendingAnalyzeForCurrentSelection()) return;
 
     // 取消上一个未完成的请求，防止旧响应覆盖新数据
     if (_abortController) _abortController.abort();
     _abortController = new AbortController();
     const signal = _abortController.signal;
+    const requestToken = ++_analysisToken;
+    clearPeriodReturnsPolling();
+    clearPendingPeriodReturnsContext();
 
     setLoading(true);
     hideError();
@@ -488,27 +513,30 @@ async function analyzeFund() {
             signal: signal,
         });
         const data = await resp.json();
+        if (requestToken !== _analysisToken) return;
         if (!resp.ok) { showError(data.error || '分析失败'); return; }
 
         currentData = data;
-        renderAll(data);
+        renderAll(data, requestToken);
         document.getElementById('main-content').classList.remove('hidden');
         document.getElementById('update-time').textContent = new Date().toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
     } catch (e) {
         if (e.name === 'AbortError') return; // 被新请求取消，忽略
+        if (requestToken !== _analysisToken) return;
         showError('网络错误: ' + e.message);
     } finally {
-        setLoading(false);
+        if (requestToken === _analysisToken) setLoading(false);
     }
 }
 
 // ===== 渲染全部 =====
-function renderAll(data) {
-    const isRegime = (data.strategy === 'regime_adaptive');
+function renderAll(data, analysisToken) {
+    applyStrategyContext(data.strategy_context, data.strategy);
+    const isRegime = (currentStrategy === 'regime_adaptive');
     renderFundInfo(data);
     renderRecommendation(data.recommendation, isRegime);
     renderIndicators(data.recommendation.indicators, isRegime);
-    renderPeriodReturns(data.period_returns);
+    renderPeriodReturnsSection(data, analysisToken);
     renderSignalChart(data.chart, data.signal_points);
     renderRecHistory(data.rec_history);
     renderStrategyParams(data.strategy_params, isRegime);
@@ -638,8 +666,151 @@ function renderRecommendation(rec, isRegime) {
 }
 
 // ===== 区间收益 =====
-function renderPeriodReturns(returns) {
+function clearPeriodReturnsPolling() {
+    if (_periodReturnsPollTimer) {
+        clearTimeout(_periodReturnsPollTimer);
+        _periodReturnsPollTimer = null;
+    }
+}
+
+function clearPendingPeriodReturnsContext() {
+    _pendingPeriodReturnsContext = null;
+    syncAnalyzeButtonState();
+}
+
+function setPendingPeriodReturnsContext(context) {
+    const sameContext = _pendingPeriodReturnsContext &&
+        _pendingPeriodReturnsContext.fund_code === context.fund_code &&
+        _pendingPeriodReturnsContext.strategy === context.strategy &&
+        _pendingPeriodReturnsContext.end_date === context.end_date;
+
+    _pendingPeriodReturnsContext = {
+        ...context,
+        pending_since_ms: sameContext
+            ? _pendingPeriodReturnsContext.pending_since_ms
+            : (context.pending_since_ms || Date.now()),
+    };
+    syncAnalyzeButtonState();
+}
+
+function isPendingAnalyzeForCurrentSelection() {
+    if (!_pendingPeriodReturnsContext) return false;
+    const currentCode = document.getElementById('fund-code').value.trim();
+    const selectedStrategy = currentStrategy || currentData?.strategy || '';
+    return (
+        currentCode &&
+        _pendingPeriodReturnsContext.fund_code === currentCode &&
+        _pendingPeriodReturnsContext.strategy === selectedStrategy
+    );
+}
+
+function syncAnalyzeButtonState() {
+    const btn = document.getElementById('btn-analyze');
+    const text = document.getElementById('btn-text');
+    const spin = document.getElementById('btn-loading');
+
+    if (_isAnalyzeLoading) {
+        btn.disabled = true;
+        text.textContent = '分析';
+        text.classList.add('hidden');
+        spin.textContent = '分析中...';
+        spin.classList.remove('hidden');
+        return;
+    }
+
+    const lockedByPending = isPendingAnalyzeForCurrentSelection();
+    btn.disabled = lockedByPending;
+    text.classList.remove('hidden');
+    spin.classList.add('hidden');
+
+    if (lockedByPending) {
+        text.textContent = '回测中...';
+    } else {
+        text.textContent = '分析';
+    }
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+}
+
+function updatePeriodReturnsState(status, returns, error) {
+    if (!currentData) return;
+    currentData.period_returns_status = status;
+    currentData.period_returns = returns;
+    currentData.period_returns_error = error;
+}
+
+function getPendingPeriodReturnsMessage(context) {
+    const pendingSinceMs = context?.pending_since_ms || Date.now();
+    const elapsedMs = Date.now() - pendingSinceMs;
+    if (elapsedMs >= PERIOD_RETURNS_SLOW_THRESHOLD_MS) {
+        return '回测耗时较长，仍在后台处理中，可继续查看其他分析内容。';
+    }
+    return '主分析结果已返回，区间收益将在后台完成后自动刷新。';
+}
+
+function getPeriodReturnsPollIntervalMs(context) {
+    const pendingSinceMs = context?.pending_since_ms || Date.now();
+    const elapsedMs = Date.now() - pendingSinceMs;
+    if (elapsedMs >= PERIOD_RETURNS_SLOW_THRESHOLD_MS) {
+        return PERIOD_RETURNS_SLOW_INTERVAL_MS;
+    }
+    return PERIOD_RETURNS_FAST_INTERVAL_MS;
+}
+
+function renderPeriodReturnsSection(data, analysisToken) {
+    if (data.period_returns_status === 'pending') {
+        setPendingPeriodReturnsContext({
+            fund_code: data.fund_code,
+            strategy: data.strategy,
+            end_date: data.period_returns_end_date,
+        });
+    } else {
+        clearPendingPeriodReturnsContext();
+    }
+
+    renderPeriodReturns(
+        data.period_returns,
+        data.period_returns_status,
+        data.period_returns_error,
+        _pendingPeriodReturnsContext
+    );
+
+    if (data.period_returns_status === 'pending') {
+        startPeriodReturnsPolling(_pendingPeriodReturnsContext, analysisToken);
+    } else {
+        clearPeriodReturnsPolling();
+    }
+}
+
+function renderPeriodReturns(returns, status = 'ready', error = null, pendingContext = null) {
     const container = document.getElementById('period-returns');
+    if (status === 'pending') {
+        const pendingMessage = getPendingPeriodReturnsMessage(pendingContext);
+        container.innerHTML = `<div class="indicator-card animate-in" style="grid-column:1 / -1; border-color: rgba(56,189,248,0.22);">
+            <div style="font-size:11px; color:var(--text-muted); margin-bottom:8px;">区间收益</div>
+            <div class="mono" style="font-size:18px; font-weight:700; color:var(--accent-cyan);">计算中...</div>
+            <div style="margin-top:6px; font-size:12px; color:var(--text-muted);">${pendingMessage}</div>
+        </div>`;
+        return;
+    }
+
+    if (status === 'error') {
+        const message = escapeHtml(error || '区间收益计算失败，请重试');
+        container.innerHTML = `<div class="indicator-card animate-in" style="grid-column:1 / -1; border-color: rgba(248,113,113,0.22);">
+            <div style="font-size:11px; color:var(--text-muted); margin-bottom:8px;">区间收益</div>
+            <div style="font-size:13px; color:var(--accent-sell); line-height:1.7;">${message}</div>
+            <button type="button" onclick="analyzeFund()" style="margin-top:12px; padding:8px 14px; border-radius:8px; border:1px solid rgba(248,113,113,0.3); background:rgba(248,113,113,0.08); color:var(--accent-sell); font-size:12px; cursor:pointer;">重试区间收益</button>
+        </div>`;
+        return;
+    }
+
     if (!returns || returns.length === 0) { container.innerHTML = ''; return; }
     container.innerHTML = returns.map((r, i) => {
         const sp = r.strategy_pct;
@@ -656,6 +827,46 @@ function renderPeriodReturns(returns) {
             <div style="margin-top:6px; font-size:11px; color:var(--text-muted);">基金 <span class="mono" style="color:${fColor}">${fSign}${fp.toFixed(2)}%</span></div>
         </div>`;
     }).join('');
+}
+
+function startPeriodReturnsPolling(context, analysisToken) {
+    clearPeriodReturnsPolling();
+
+    if (analysisToken !== _analysisToken) return;
+
+    _periodReturnsPollTimer = setTimeout(async () => {
+        try {
+            renderPeriodReturns(null, 'pending', null, context);
+            const params = new URLSearchParams(context);
+            const resp = await fetch('/api/period-returns?' + params.toString());
+            const data = await resp.json();
+
+            if (analysisToken !== _analysisToken) return;
+            if (!resp.ok) throw new Error(data.error || '区间收益查询失败');
+
+            if (data.status === 'ready') {
+                clearPeriodReturnsPolling();
+                clearPendingPeriodReturnsContext();
+                updatePeriodReturnsState('ready', data.period_returns, null);
+                renderPeriodReturns(data.period_returns, 'ready', null);
+                return;
+            }
+
+            if (data.status === 'error') {
+                clearPeriodReturnsPolling();
+                clearPendingPeriodReturnsContext();
+                updatePeriodReturnsState('error', null, data.error || '区间收益计算失败，请重试');
+                renderPeriodReturns(null, 'error', data.error || '区间收益计算失败，请重试');
+                return;
+            }
+
+            startPeriodReturnsPolling(context, analysisToken);
+        } catch (e) {
+            if (analysisToken !== _analysisToken) return;
+
+            startPeriodReturnsPolling(context, analysisToken);
+        }
+    }, getPeriodReturnsPollIntervalMs(context));
 }
 
 // ===== 指标面板 =====
@@ -878,18 +1089,8 @@ function renderRecHistory(records) {
 
 // ===== 工具函数 =====
 function setLoading(loading) {
-    const btn = document.getElementById('btn-analyze');
-    const text = document.getElementById('btn-text');
-    const spin = document.getElementById('btn-loading');
-    if (loading) {
-        btn.disabled = true;
-        text.classList.add('hidden');
-        spin.classList.remove('hidden');
-    } else {
-        btn.disabled = false;
-        text.classList.remove('hidden');
-        spin.classList.add('hidden');
-    }
+    _isAnalyzeLoading = loading;
+    syncAnalyzeButtonState();
 }
 
 function showError(msg) {
@@ -902,12 +1103,16 @@ function hideError() {
     document.getElementById('error-msg').classList.add('hidden');
 }
 
+document.getElementById('fund-code').addEventListener('input', () => {
+    syncAnalyzeButtonState();
+});
+
 document.getElementById('fund-code').addEventListener('keypress', (e) => {
     if (e.key === 'Enter') analyzeFund();
 });
 
-// 页面加载时显示默认策略简介
-updateStrategyDesc(currentStrategy);
+updateStrategyDesc(null);
+syncAnalyzeButtonState();
 </script>
 
 </body>

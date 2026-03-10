@@ -249,6 +249,18 @@ class DcaWebTestCase(unittest.TestCase):
         )
         mock_estimate_navs.assert_called_once_with(["000001"], True)
 
+    def test_dev_server_run_options_keep_reloader_but_exclude_test_noise(self):
+        options = self.web_app._get_dev_server_run_options()
+
+        self.assertTrue(options["debug"])
+        self.assertTrue(options["use_reloader"])
+        self.assertEqual(options["host"], "127.0.0.1")
+        self.assertEqual(options["port"], 5000)
+        self.assertIn("*/tests/*", options["exclude_patterns"])
+        self.assertIn("*/__pycache__/*", options["exclude_patterns"])
+        self.assertIn("*/.pytest_cache/*", options["exclude_patterns"])
+        self.assertIn("*.pyc", options["exclude_patterns"])
+
     def test_dca_estimates_keeps_order_and_single_fund_failure(self):
         with patch.object(
             self.web_app,
@@ -311,6 +323,41 @@ class DcaWebTestCase(unittest.TestCase):
         payload = response.get_json()
         self.assertTrue(payload["strict_mode"])
         self.assertEqual(payload["results"], [])
+
+    def test_dca_estimates_returns_friendly_error_when_request_fails(self):
+        with patch.object(self.web_app, "_estimate_navs", side_effect=RuntimeError("boom")):
+            response = self.client.post("/api/dca/estimates", json={"fund_codes": ["000001"]})
+
+        self.assertEqual(response.status_code, 500)
+        payload = response.get_json()
+        self.assertEqual(payload["error"], "净值估算失败: boom")
+
+    def test_dca_estimates_mixed_batch_keeps_200_and_card_states(self):
+        with patch.object(
+            self.web_app,
+            "_estimate_navs",
+            return_value={
+                "summary": {"strict_mode": True},
+                "results": [
+                    {"fund_code": "015916", "status": "成功", "estimated_nav": 1.01, "estimated_return": -1.4, "nav_date": "2026-03-10", "warnings": []},
+                    {"fund_code": "018291", "status": "成功", "estimated_nav": 1.02, "estimated_return": -3.1, "nav_date": "2026-03-10", "warnings": []},
+                    {"fund_code": "018345", "status": "失败", "estimated_nav": None, "estimated_return": None, "nav_date": None, "warnings": []},
+                    {"fund_code": "020989", "status": "成功", "estimated_nav": 1.03, "estimated_return": 0.02, "nav_date": "2026-03-10", "warnings": []},
+                    {"fund_code": "023639", "status": "失败", "estimated_nav": None, "estimated_return": None, "nav_date": None, "warnings": []},
+                ],
+            },
+        ):
+            response = self.client.post(
+                "/api/dca/estimates",
+                json={"fund_codes": ["015916", "018291", "018345", "020989", "023639"]},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual([item["fund_code"] for item in payload["results"]], ["015916", "018291", "018345", "020989", "023639"])
+        self.assertEqual([item["status"] for item in payload["results"]], ["success", "success", "failed", "success", "failed"])
+        self.assertEqual(payload["results"][2]["message"], "严格模式暂不可用")
+        self.assertEqual(payload["results"][4]["message"], "严格模式暂不可用")
 
 
 if __name__ == "__main__":

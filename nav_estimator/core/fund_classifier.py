@@ -5,6 +5,7 @@ from typing import Literal
 
 from loguru import logger
 
+from ..config.settings import TRACKING_TARGET_CALIBRATIONS
 from ..data.fetcher.fund_fetcher import FundFetcher
 
 
@@ -37,6 +38,10 @@ class FundClassifier:
 
         if "qdii" in fund_type_lower or any(kw in fund_name_lower for kw in qdii_keywords):
             return "qdii"
+
+        calibrated_tracking_target = TRACKING_TARGET_CALIBRATIONS.get(str(fund_info.get("code", fund_code)).strip())
+        if calibrated_tracking_target is not None and self.fund_fetcher.is_etf_or_linked_fund(fund_info):
+            return "index_a"
 
         if (
             "指数" in fund_name

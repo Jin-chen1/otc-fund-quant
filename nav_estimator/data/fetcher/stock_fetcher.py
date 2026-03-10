@@ -76,13 +76,21 @@ class StockFetcher(BaseFetcher):
         return prices
 
     @staticmethod
-    def _get_a_secid(code: str) -> str:
+    def _resolve_a_share_exchange(code: str) -> tuple[str, str]:
         normalized_code = str(code).strip()
         if not (len(normalized_code) == 6 and normalized_code.isdigit()):
             raise ValueError(f"A股代码非法: {code}")
-        if normalized_code.startswith("6"):
-            return f"1.{normalized_code}"
-        return f"0.{normalized_code}"
+        if normalized_code[:2] in {"11", "13"} or normalized_code[0] in {"5", "6", "9"}:
+            return "sh", "1"
+        if normalized_code[0] in {"0", "1", "2", "3"}:
+            return "sz", "0"
+        raise ValueError(f"A股代码 {normalized_code} 无法识别交易所归属")
+
+    @staticmethod
+    def _get_a_secid(code: str) -> str:
+        normalized_code = str(code).strip()
+        _, market_id = StockFetcher._resolve_a_share_exchange(normalized_code)
+        return f"{market_id}.{normalized_code}"
 
     @staticmethod
     def _get_hk_secid(code: str) -> str:
@@ -172,9 +180,8 @@ class StockFetcher(BaseFetcher):
     @staticmethod
     def _get_a_index_code_for_sina(code: str) -> str:
         normalized_code = str(code).strip()
-        if normalized_code.startswith("6"):
-            return f"sh{normalized_code}"
-        return f"sz{normalized_code}"
+        exchange_prefix, _ = StockFetcher._resolve_a_share_exchange(normalized_code)
+        return f"{exchange_prefix}{normalized_code}"
 
     @staticmethod
     def _build_quote_live_payload(

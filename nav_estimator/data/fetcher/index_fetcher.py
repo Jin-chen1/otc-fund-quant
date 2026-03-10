@@ -1,6 +1,9 @@
 """指数行情数据获取器。"""
 
 from datetime import date
+import hashlib
+import json
+import math
 from typing import Any
 
 import akshare as ak
@@ -9,11 +12,15 @@ from loguru import logger
 import requests
 
 from .base_fetcher import BaseFetcher
+from .fund_fetcher import FundFetcher
 from .historical_provider import AkshareHistoricalDataProvider, HistoricalDataProvider
 
 
 class IndexFetcher(BaseFetcher):
     """A股、港股指数行情获取。"""
+    A_INDEX_LIVE_CACHE_SCHEMA_VERSION = FundFetcher.A_INDEX_CACHE_SCHEMA_VERSION
+    A_INDEX_UNSUPPORTED_CACHE_TTL = 60
+    A_INDEX_LIVE_COVERAGE_CACHE_TTL = 60
 
     SINA_HEADERS = {
         "Referer": "https://vip.stock.finance.sina.com.cn/",
@@ -70,6 +77,153 @@ class IndexFetcher(BaseFetcher):
             raw={"index_code": index_code, "change_pct": float(value)},
             data_as_of_date=data_as_of_date or date.today().isoformat(),
         )
+
+    @staticmethod
+    def _build_a_index_live_unsupported_message(index_code: str) -> str:
+        normalized_symbol = IndexFetcher._normalize_a_index_code(index_code)
+        return (
+            f"A股指数 {index_code} 实时行情源不支持该指数代码；"
+            f"主源异常: 新浪指数实时行情为空: {normalized_symbol}; "
+            f"备源异常: 未找到A股指数 {index_code}"
+        )
+
+    @staticmethod
+    def _normalize_unsupported_a_index_live_error(index_code: str, error: Exception) -> Exception:
+        message = str(error)
+        if (
+            "主备实时源均不可用" in message
+            and "新浪指数实时行情为空:" in message
+            and f"未找到A股指数 {index_code}" in message
+        ):
+            return ValueError(IndexFetcher._build_a_index_live_unsupported_message(index_code))
+        return error
+
+    @classmethod
+    def _build_a_index_live_unsupported_cache_key(cls, index_code: str) -> str:
+        normalized_code = cls._normalize_a_index_code(index_code)
+        payload = {
+            "args": [{"__instance_class__": cls.__name__}, normalized_code],
+            "kwargs": {},
+            "kind": "unsupported_live_error",
+            "schema_version": cls.A_INDEX_LIVE_CACHE_SCHEMA_VERSION,
+        }
+        payload_text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return (
+            f"{cls.get_a_index_return_live.__module__}.{cls.get_a_index_return_live.__name__}"
+            f":negative:{hashlib.sha256(payload_text.encode('utf-8')).hexdigest()}"
+        )
+
+    @classmethod
+    def _get_cached_a_index_live_unsupported_error(cls, index_code: str) -> str | None:
+        cache_key = cls._build_a_index_live_unsupported_cache_key(index_code)
+        cached = BaseFetcher.cache.get(cache_key)
+        if (
+            isinstance(cached, dict)
+            and cached.get("kind") == "a_index_live_unsupported"
+            and cached.get("schema_version") == cls.A_INDEX_LIVE_CACHE_SCHEMA_VERSION
+        ):
+            return str(cached.get("message", "")).strip() or None
+        return None
+
+    @classmethod
+    def _set_cached_a_index_live_unsupported_error(cls, index_code: str, message: str):
+        cache_key = cls._build_a_index_live_unsupported_cache_key(index_code)
+        BaseFetcher.cache.set(
+            cache_key,
+            {
+                "kind": "a_index_live_unsupported",
+                "schema_version": cls.A_INDEX_LIVE_CACHE_SCHEMA_VERSION,
+                "message": str(message),
+            },
+            ttl=cls.A_INDEX_UNSUPPORTED_CACHE_TTL,
+        )
+
+    @classmethod
+    def _build_a_index_live_coverage_cache_key(cls) -> str:
+        payload = {
+            "args": [{"__instance_class__": cls.__name__}],
+            "kwargs": {},
+            "kind": "a_index_live_coverage_snapshot",
+            "schema_version": cls.A_INDEX_LIVE_CACHE_SCHEMA_VERSION,
+        }
+        payload_text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return f"{cls.__module__}.{cls.__name__}:coverage:{hashlib.sha256(payload_text.encode('utf-8')).hexdigest()}"
+
+    @classmethod
+    def _get_cached_a_index_live_coverage_snapshot(cls) -> dict[str, Any] | None:
+        cache_key = cls._build_a_index_live_coverage_cache_key()
+        cached = BaseFetcher.cache.get(cache_key)
+        if (
+            isinstance(cached, dict)
+            and cached.get("kind") == "a_index_live_coverage_snapshot"
+            and cached.get("schema_version") == cls.A_INDEX_LIVE_CACHE_SCHEMA_VERSION
+        ):
+            return cached
+        return None
+
+    @classmethod
+    def _set_cached_a_index_live_coverage_snapshot(cls, snapshot: dict[str, Any]):
+        cache_key = cls._build_a_index_live_coverage_cache_key()
+        BaseFetcher.cache.set(cache_key, snapshot, ttl=cls.A_INDEX_LIVE_COVERAGE_CACHE_TTL)
+
+    def _build_a_index_live_coverage_snapshot(self) -> dict[str, Any]:
+        errors: list[str] = []
+        sina_codes = set()
+        catalog_codes = set()
+
+        try:
+            index_df = ak.stock_zh_index_spot_sina()
+            if "代码" in index_df.columns:
+                sina_codes = {
+                    self._normalize_a_index_code(str(code))
+                    for code in index_df["代码"].dropna().astype(str)
+                    if str(code).strip() != ""
+                }
+            else:
+                errors.append(f"sina_columns={list(index_df.columns)}")
+        except Exception as error:
+            errors.append(f"sina={error}")
+
+        try:
+            catalog_snapshot = FundFetcher.get_shared_a_index_catalog_snapshot()
+            catalog_codes = {
+                self._normalize_a_index_code(str(item.get("code", "")))
+                for item in catalog_snapshot.get("records", [])
+                if str(item.get("code", "")).strip() != ""
+            }
+        except Exception as error:
+            errors.append(f"catalog={error}")
+
+        coverage_codes = {code for code in sina_codes | catalog_codes if code}
+        if not coverage_codes:
+            raise ValueError("A股实时覆盖目录快照为空: " + "; ".join(errors))
+
+        return {
+            "kind": "a_index_live_coverage_snapshot",
+            "schema_version": self.A_INDEX_LIVE_CACHE_SCHEMA_VERSION,
+            "codes": sorted(coverage_codes),
+            "sina_codes": sorted(code for code in sina_codes if code),
+            "catalog_codes": sorted(code for code in catalog_codes if code),
+        }
+
+    @staticmethod
+    def _coerce_finite_change_pct(raw_value: Any, *, label: str) -> float:
+        change_pct = float(pd.to_numeric(raw_value, errors="coerce"))
+        if pd.isna(change_pct) or not math.isfinite(change_pct):
+            raise ValueError(f"{label}涨跌幅异常")
+        return change_pct
+
+    def _get_a_index_live_coverage_snapshot(self) -> dict[str, Any] | None:
+        cached_snapshot = self._get_cached_a_index_live_coverage_snapshot()
+        if cached_snapshot is not None:
+            return cached_snapshot
+        try:
+            snapshot = self._build_a_index_live_coverage_snapshot()
+        except Exception as error:
+            logger.warning(f"构建A股实时覆盖目录快照失败，将继续走主备源探测: {error}")
+            return None
+        self._set_cached_a_index_live_coverage_snapshot(snapshot)
+        return snapshot
 
     def _get_a_index_return_sina_single(self, index_code: str) -> tuple[float, str | None]:
         symbol = self._normalize_a_index_code(index_code)
@@ -180,12 +334,22 @@ class IndexFetcher(BaseFetcher):
         index_row = index_df[index_df["代码"] == index_code]
         if index_row.empty:
             raise ValueError(f"未找到指数 {index_code}")
-        change_pct = float(index_row.iloc[0]["涨跌幅"])
+        change_pct = self._coerce_finite_change_pct(index_row.iloc[0]["涨跌幅"], label=f"港股指数 {index_code} 实时")
         logger.debug(f"指数 {index_code} 涨跌幅: {change_pct}%")
         return change_pct
 
     @BaseFetcher.with_cache(ttl=60)
     def get_a_index_return_live(self, index_code: str, strict: bool = True) -> dict[str, Any]:
+        cached_error = self._get_cached_a_index_live_unsupported_error(index_code)
+        if cached_error is not None:
+            raise ValueError(cached_error)
+        coverage_snapshot = self._get_a_index_live_coverage_snapshot()
+        normalized_code = self._normalize_a_index_code(index_code)
+        if coverage_snapshot is not None and normalized_code not in set(coverage_snapshot.get("codes", [])):
+            unsupported_error = self._build_a_index_live_unsupported_message(index_code)
+            self._set_cached_a_index_live_unsupported_error(index_code, unsupported_error)
+            raise ValueError(unsupported_error)
+
         def primary_fetcher():
             change_pct, data_as_of_date = self._get_a_index_return_sina_single(index_code)
             return self._build_index_live_payload(
@@ -206,13 +370,19 @@ class IndexFetcher(BaseFetcher):
                 data_as_of_date=data_as_of_date,
             )
 
-        return BaseFetcher.resolve_live_source(
-            primary_fetcher=primary_fetcher,
-            backup_fetcher=backup_fetcher,
-            strict=strict,
-            label=f"A股指数 {index_code} 实时行情",
-            threshold=1.0,
-        )
+        try:
+            return BaseFetcher.resolve_live_source(
+                primary_fetcher=primary_fetcher,
+                backup_fetcher=backup_fetcher,
+                strict=strict,
+                label=f"A股指数 {index_code} 实时行情",
+                threshold=1.0,
+            )
+        except Exception as error:
+            normalized_error = self._normalize_unsupported_a_index_live_error(index_code, error)
+            if "实时行情源不支持该指数代码" in str(normalized_error):
+                self._set_cached_a_index_live_unsupported_error(index_code, str(normalized_error))
+            raise normalized_error from error
 
     @BaseFetcher.with_cache(ttl=60)
     def get_hk_index_return_live(self, index_code: str, strict: bool = True) -> dict[str, Any]:

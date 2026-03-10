@@ -1,8 +1,14 @@
-import akshare as ak
-import sqlite3
-import pandas as pd
-from datetime import datetime
+import logging
 import os
+from datetime import datetime
+
+import akshare as ak
+import pandas as pd
+
+from .sqlite_utils import connect_sqlite, run_sqlite_write_with_retry
+
+
+logger = logging.getLogger(__name__)
 
 class DataLoader:
     def __init__(self, db_path=None):
@@ -17,22 +23,24 @@ class DataLoader:
 
     def _init_db(self):
         """Initialize the SQLite database structure."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        def _action():
+            conn = connect_sqlite(self.db_path)
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                CREATE TABLE IF NOT EXISTS fund_nav (
+                    date TEXT,
+                    fund_code TEXT,
+                    nav REAL,
+                    acc_nav REAL,
+                    PRIMARY KEY (date, fund_code)
+                )
+                ''')
+                conn.commit()
+            finally:
+                conn.close()
 
-        # Create fund_nav table if not exists
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS fund_nav (
-            date TEXT,
-            fund_code TEXT,
-            nav REAL,
-            acc_nav REAL,
-            PRIMARY KEY (date, fund_code)
-        )
-        ''')
-
-        conn.commit()
-        conn.close()
+        run_sqlite_write_with_retry(_action, logger=logger, action_name="loader_init_db")
 
     def fetch_nav(self, fund_code, start_date, end_date):
         """
@@ -128,7 +136,7 @@ class DataLoader:
             fund_code (str): Fund code
         """
         # Determine start date: find last date in DB or default to a distant past
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_sqlite(self.db_path)
         cursor = conn.cursor()
 
         cursor.execute('SELECT MAX(date) FROM fund_nav WHERE fund_code = ?', (fund_code,))
@@ -155,30 +163,32 @@ class DataLoader:
             return
 
         # Save to DB
-        conn = sqlite3.connect(self.db_path)
+        def _action():
+            conn = connect_sqlite(self.db_path)
+            try:
+                # Use 'replace' to handle potential overlaps/updates
+                # However, pandas to_sql 'replace' drops the table. We want 'append'.
+                # But we need to handle duplicates (Primary Key).
+                # SQLite doesn't have "INSERT OR UPDATE" standard in standard SQL without UPSERT syntax (newer sqlite).
+                # We can delete existing records in the range and insert new ones.
+                dates = df['date'].tolist()
+                if dates:
+                    placeholders = ','.join(['?'] * len(dates))
+                    # Delete existing records for these dates to avoid PK constraint failure on re-run
+                    query = f"DELETE FROM fund_nav WHERE fund_code = ? AND date IN ({placeholders})"
+                    params = [fund_code] + dates
+                    conn.execute(query, params)
+
+                df.to_sql('fund_nav', conn, if_exists='append', index=False)
+                conn.commit()
+                print(f"Updated {len(df)} records for {fund_code}")
+            finally:
+                conn.close()
+
         try:
-            # Use 'replace' to handle potential overlaps/updates
-            # However, pandas to_sql 'replace' drops the table. We want 'append'.
-            # But we need to handle duplicates (Primary Key).
-            # SQLite doesn't have "INSERT OR UPDATE" standard in standard SQL without UPSERT syntax (newer sqlite).
-            # We can delete existing records in the range and insert new ones.
-
-            dates = df['date'].tolist()
-            if dates:
-                placeholders = ','.join(['?'] * len(dates))
-                # Delete existing records for these dates to avoid PK constraint failure on re-run
-                query = f"DELETE FROM fund_nav WHERE fund_code = ? AND date IN ({placeholders})"
-                params = [fund_code] + dates
-                conn.execute(query, params)
-
-            df.to_sql('fund_nav', conn, if_exists='append', index=False)
-            print(f"Updated {len(df)} records for {fund_code}")
-
+            run_sqlite_write_with_retry(_action, logger=logger, action_name="loader_update_db")
         except Exception as e:
             print(f"Error updating database: {e}")
-        finally:
-            conn.commit()
-            conn.close()
 
     def load_nav(self, fund_code, date):
         """
@@ -191,7 +201,7 @@ class DataLoader:
         Returns:
             dict: {'nav': float, 'acc_nav': float} or None if not found
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_sqlite(self.db_path)
         cursor = conn.cursor()
 
         cursor.execute('''

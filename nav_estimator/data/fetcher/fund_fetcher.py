@@ -1,8 +1,10 @@
 """基金数据获取器。"""
 
+import hashlib
 import json
 from datetime import datetime
 import re
+import threading
 from typing import Any
 
 import akshare as ak
@@ -11,10 +13,12 @@ import requests
 from loguru import logger
 
 from ...config.settings import (
+    A_INDEX_ALIAS_CALIBRATIONS,
     INDEX_ALIAS_CATALOG,
     NON_EQUITY_BENCHMARK_KEYWORDS,
     PROXY_INDEX_MAP,
     QDII_PROXY_BASKETS,
+    TRACKING_TARGET_CALIBRATIONS,
 )
 from .base_fetcher import BaseFetcher
 from .historical_provider import AkshareHistoricalDataProvider, HistoricalDataProvider
@@ -22,6 +26,9 @@ from .historical_provider import AkshareHistoricalDataProvider, HistoricalDataPr
 
 class FundFetcher(BaseFetcher):
     """基金基本信息、净值、持仓数据获取。"""
+
+    _catalog_prewarm_lock = threading.Lock()
+    _catalog_prewarm_thread: threading.Thread | None = None
 
     PINGZHONGDATA_HEADERS = {
         "Referer": "https://fund.eastmoney.com/",
@@ -50,6 +57,45 @@ class FundFetcher(BaseFetcher):
     )
     GENERIC_A_INDEX_PATTERN = re.compile(
         r"([A-Za-z0-9\u4e00-\u9fa5\-]+?指数(?:（人民币）|\(人民币\)|（全价）|\(全价\))?)"
+    )
+    A_INDEX_CACHE_SCHEMA_VERSION = "v2"
+    A_INDEX_CATALOG_CACHE_TTL = 24 * 60 * 60
+    A_INDEX_CATALOG_CACHE_RETENTION_TTL = 7 * 24 * 60 * 60
+    A_INDEX_CATALOG_MIN_RECORDS = 50
+    A_INDEX_LOOKUP_SUCCESS_CACHE_TTL = 24 * 60 * 60
+    A_INDEX_LOOKUP_NEGATIVE_CACHE_TTL = 20 * 60
+    DYNAMIC_A_INDEX_MIN_NAME_LENGTH = 4
+    DYNAMIC_A_INDEX_EXPLANATORY_TOKENS = (
+        "跟踪",
+        "标的",
+        "买入",
+        "追求",
+        "获得",
+        "通过",
+        "成份股",
+        "备选",
+        "基金",
+        "税后",
+        "存款",
+        "银行",
+    )
+    DYNAMIC_A_INDEX_EXCLUDED_CANDIDATES = {
+        "综合指数",
+        "股票型-标准指数",
+        "标的指数",
+        "紧密跟踪标的指数",
+        "基金指数",
+    }
+    DYNAMIC_A_INDEX_LEFT_CONTEXT_EXCLUDED_TOKENS = (
+        "中债",
+        "国债",
+        "信用债",
+        "政金债",
+        "存款",
+        "银行",
+    )
+    DYNAMIC_A_INDEX_CONTEXT_PATTERN = re.compile(
+        r"收益率|(?:\*|×|x|X)\s*\d+(?:\.\d+)?\s*%|\d+(?:\.\d+)?\s*%(?:\s*(?:\*|×|x|X))?|[+＋]"
     )
 
     def __init__(self, historical_provider: HistoricalDataProvider | None = None):
@@ -495,7 +541,11 @@ class FundFetcher(BaseFetcher):
         return " ".join(text_items)
 
     @staticmethod
-    def _normalize_index_name(index_name: str) -> str:
+    def _get_benchmark_text(fund_info: dict[str, Any]) -> str:
+        return str(fund_info.get("benchmark", "")).strip()
+
+    @staticmethod
+    def _normalize_index_name(index_name: str, *, strip_index_suffix: bool = True) -> str:
         normalized = str(index_name).strip().lower()
         normalized = normalized.replace("（", "(").replace("）", ")").replace("＋", "+")
         normalized = re.sub(r"\s+", "", normalized)
@@ -509,7 +559,7 @@ class FundFetcher(BaseFetcher):
             "（税后）",
         ):
             normalized = normalized.replace(token, "")
-        if normalized.endswith("指数"):
+        if strip_index_suffix and normalized.endswith("指数"):
             normalized = normalized[:-2]
         return normalized
 
@@ -517,6 +567,364 @@ class FundFetcher(BaseFetcher):
     def _is_non_equity_benchmark_text(text: str) -> bool:
         normalized = str(text).strip().lower()
         return any(keyword.lower() in normalized for keyword in NON_EQUITY_BENCHMARK_KEYWORDS)
+
+    @classmethod
+    def _normalize_tracking_name_key(cls, index_name: str) -> str:
+        return cls._normalize_index_name(index_name, strip_index_suffix=False)
+
+    @classmethod
+    def _get_a_index_calibration_entry(cls, index_name: str) -> dict[str, Any] | None:
+        target_name = str(index_name).strip()
+        if target_name == "":
+            return None
+        normalized_candidates = {
+            cls._normalize_tracking_name_key(target_name),
+            cls._normalize_index_name(target_name),
+        }
+        normalized_candidates.discard("")
+        if not normalized_candidates:
+            return None
+
+        for entry in A_INDEX_ALIAS_CALIBRATIONS:
+            entry_names = [str(entry.get("canonical_name", ""))] + [str(alias) for alias in entry.get("aliases", [])]
+            entry_normalized_names = {
+                cls._normalize_tracking_name_key(name)
+                for name in entry_names
+                if str(name).strip() != ""
+            }
+            entry_normalized_names.update(
+                cls._normalize_index_name(name)
+                for name in entry_names
+                if str(name).strip() != ""
+            )
+            entry_normalized_names.discard("")
+            if normalized_candidates & entry_normalized_names:
+                return entry
+        return None
+
+    @classmethod
+    def _resolve_a_index_code_from_calibration(cls, index_name: str) -> dict[str, str] | None:
+        entry = cls._get_a_index_calibration_entry(index_name)
+        if entry is None:
+            return None
+        preferred_code = str(entry.get("preferred_code", "")).strip()
+        if preferred_code == "":
+            return None
+        return {
+            "code": preferred_code,
+            "name": str(entry.get("canonical_name") or index_name).strip(),
+        }
+
+    @classmethod
+    def _run_catalog_prewarm(cls, force_refresh: bool):
+        try:
+            cls.get_shared_a_index_catalog_snapshot(force_refresh=force_refresh)
+        except Exception as error:
+            logger.warning(f"A股指数目录预热失败: {error}")
+
+    @classmethod
+    def schedule_a_index_catalog_prewarm(cls, force_refresh: bool = False):
+        with cls._catalog_prewarm_lock:
+            thread = cls._catalog_prewarm_thread
+            if thread is not None and thread.is_alive():
+                return
+            cls._catalog_prewarm_thread = threading.Thread(
+                target=cls._run_catalog_prewarm,
+                args=(force_refresh,),
+                name="a-index-catalog-prewarm",
+                daemon=True,
+            )
+            cls._catalog_prewarm_thread.start()
+
+    @classmethod
+    def _build_a_index_catalog_cache_key(cls) -> str:
+        payload = {
+            "args": [{"__instance_class__": cls.__name__}, list(cls.A_INDEX_SPOT_SYMBOL_CANDIDATES)],
+            "kwargs": {},
+            "kind": "a_index_catalog_snapshot",
+            "schema_version": cls.A_INDEX_CACHE_SCHEMA_VERSION,
+        }
+        payload_text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return f"{cls.__module__}.{cls.__name__}:catalog:{hashlib.sha256(payload_text.encode('utf-8')).hexdigest()}"
+
+    @classmethod
+    def _is_valid_a_index_catalog_snapshot(cls, snapshot: Any) -> bool:
+        if not isinstance(snapshot, dict):
+            return False
+        if snapshot.get("kind") != "a_index_catalog_snapshot":
+            return False
+        if snapshot.get("schema_version") != cls.A_INDEX_CACHE_SCHEMA_VERSION:
+            return False
+        records = snapshot.get("records")
+        if not isinstance(records, list) or len(records) < cls.A_INDEX_CATALOG_MIN_RECORDS:
+            return False
+        for record in records:
+            if not isinstance(record, dict):
+                return False
+            code = str(record.get("code", "")).strip()
+            name = str(record.get("name", "")).strip()
+            normalized_name = str(record.get("normalized_name", "")).strip()
+            if not (len(code) == 6 and code.isdigit()):
+                return False
+            if name == "" or normalized_name == "":
+                return False
+        return True
+
+    @classmethod
+    def _get_cached_a_index_catalog_snapshot(cls) -> dict[str, Any] | None:
+        cache_key = cls._build_a_index_catalog_cache_key()
+        cached = BaseFetcher.cache.get(cache_key)
+        if cls._is_valid_a_index_catalog_snapshot(cached):
+            return cached
+        return None
+
+    @classmethod
+    def _set_cached_a_index_catalog_snapshot(cls, snapshot: dict[str, Any]):
+        cache_key = cls._build_a_index_catalog_cache_key()
+        BaseFetcher.cache.set(
+            cache_key,
+            snapshot,
+            ttl=cls.A_INDEX_CATALOG_CACHE_RETENTION_TTL,
+        )
+
+    @classmethod
+    def _is_a_index_catalog_snapshot_fresh(cls, snapshot: dict[str, Any]) -> bool:
+        refreshed_at = str(snapshot.get("refreshed_at", "")).strip()
+        if refreshed_at == "":
+            return False
+        try:
+            refreshed_at_dt = datetime.fromisoformat(refreshed_at)
+        except ValueError:
+            return False
+        return (datetime.utcnow() - refreshed_at_dt).total_seconds() <= cls.A_INDEX_CATALOG_CACHE_TTL
+
+    @classmethod
+    def _fetch_a_index_catalog_records(cls) -> list[dict[str, str]]:
+        records: list[dict[str, str]] = []
+        seen_records = set()
+        for symbol in cls.A_INDEX_SPOT_SYMBOL_CANDIDATES:
+            try:
+                index_df = ak.stock_zh_index_spot_em(symbol=symbol)
+            except Exception as error:
+                logger.warning(f"A股指数目录拉取失败: symbol={symbol}, error={error}")
+                continue
+            if "名称" not in index_df.columns or "代码" not in index_df.columns:
+                logger.warning(f"A股指数目录字段异常: symbol={symbol}, columns={list(index_df.columns)}")
+                continue
+            for _, row in index_df[["名称", "代码"]].dropna().drop_duplicates().iterrows():
+                name = str(row["名称"]).strip()
+                code = str(row["代码"]).strip()
+                if name == "" or not (len(code) == 6 and code.isdigit()):
+                    continue
+                if cls._is_non_equity_benchmark_text(name):
+                    continue
+                normalized_name = cls._normalize_index_name(name)
+                if normalized_name == "":
+                    continue
+                record_key = (code, name, normalized_name)
+                if record_key in seen_records:
+                    continue
+                seen_records.add(record_key)
+                records.append(
+                    {
+                        "code": code,
+                        "name": name,
+                        "normalized_name": normalized_name,
+                        "source_symbol": symbol,
+                    }
+                )
+        if len(records) < cls.A_INDEX_CATALOG_MIN_RECORDS:
+            raise ValueError(f"A股指数目录快照记录数不足: {len(records)}")
+        records.sort(key=lambda item: (item["normalized_name"], item["code"], item["name"]))
+        return records
+
+    @classmethod
+    def get_shared_a_index_catalog_snapshot(cls, force_refresh: bool = False) -> dict[str, Any]:
+        cached_snapshot = cls._get_cached_a_index_catalog_snapshot()
+        if cached_snapshot is not None and not force_refresh:
+            if cls._is_a_index_catalog_snapshot_fresh(cached_snapshot):
+                return cached_snapshot
+            cls.schedule_a_index_catalog_prewarm(force_refresh=True)
+            return cached_snapshot
+
+        try:
+            snapshot = {
+                "kind": "a_index_catalog_snapshot",
+                "schema_version": cls.A_INDEX_CACHE_SCHEMA_VERSION,
+                "refreshed_at": datetime.utcnow().isoformat(),
+                "records": cls._fetch_a_index_catalog_records(),
+            }
+            cls._set_cached_a_index_catalog_snapshot(snapshot)
+            return snapshot
+        except Exception as error:
+            if cached_snapshot is not None:
+                logger.warning(f"刷新A股指数目录快照失败，将继续使用旧快照: {error}")
+                return cached_snapshot
+            raise
+
+    @classmethod
+    def _build_a_index_lookup_negative_cache_key(cls, index_name: str) -> str:
+        normalized_name = cls._normalize_index_name(index_name) or str(index_name).strip()
+        payload = {
+            "args": [{"__instance_class__": cls.__name__}, normalized_name],
+            "kwargs": {},
+            "kind": "negative_lookup",
+            "schema_version": cls.A_INDEX_CACHE_SCHEMA_VERSION,
+        }
+        payload_text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return (
+            f"{cls._lookup_a_index_code_by_name.__module__}.{cls._lookup_a_index_code_by_name.__name__}"
+            f":negative:{hashlib.sha256(payload_text.encode('utf-8')).hexdigest()}"
+        )
+
+    @classmethod
+    def _build_a_index_lookup_success_cache_key(cls, index_name: str) -> str:
+        normalized_name = cls._normalize_index_name(index_name) or str(index_name).strip()
+        payload = {
+            "args": [{"__instance_class__": cls.__name__}, normalized_name],
+            "kwargs": {},
+            "kind": "success_lookup",
+            "schema_version": cls.A_INDEX_CACHE_SCHEMA_VERSION,
+        }
+        payload_text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return (
+            f"{cls._lookup_a_index_code_by_name.__module__}.{cls._lookup_a_index_code_by_name.__name__}"
+            f":success:{hashlib.sha256(payload_text.encode('utf-8')).hexdigest()}"
+        )
+
+    @classmethod
+    def _get_cached_a_index_lookup_success(cls, index_name: str) -> dict[str, str] | None:
+        cache_key = cls._build_a_index_lookup_success_cache_key(index_name)
+        cached = BaseFetcher.cache.get(cache_key)
+        if (
+            isinstance(cached, dict)
+            and cached.get("kind") == "a_index_lookup_success"
+            and cached.get("schema_version") == cls.A_INDEX_CACHE_SCHEMA_VERSION
+        ):
+            result = cached.get("result")
+            if isinstance(result, dict):
+                code = str(result.get("code", "")).strip()
+                name = str(result.get("name", "")).strip()
+                if code != "" and name != "":
+                    return {"code": code, "name": name}
+        return None
+
+    @classmethod
+    def _get_cached_a_index_lookup_failure(cls, index_name: str) -> str | None:
+        cache_key = cls._build_a_index_lookup_negative_cache_key(index_name)
+        cached = BaseFetcher.cache.get(cache_key)
+        if (
+            isinstance(cached, dict)
+            and cached.get("kind") == "a_index_lookup_failure"
+            and cached.get("schema_version") == cls.A_INDEX_CACHE_SCHEMA_VERSION
+        ):
+            return str(cached.get("message", "")).strip() or None
+        return None
+
+    @classmethod
+    def _set_cached_a_index_lookup_success(cls, index_name: str, resolved: dict[str, str]):
+        cache_key = cls._build_a_index_lookup_success_cache_key(index_name)
+        BaseFetcher.cache.set(
+            cache_key,
+            {
+                "kind": "a_index_lookup_success",
+                "schema_version": cls.A_INDEX_CACHE_SCHEMA_VERSION,
+                "result": {"code": str(resolved["code"]), "name": str(resolved["name"])},
+            },
+            ttl=cls.A_INDEX_LOOKUP_SUCCESS_CACHE_TTL,
+        )
+
+    @classmethod
+    def _set_cached_a_index_lookup_failure(cls, index_name: str, message: str):
+        cache_key = cls._build_a_index_lookup_negative_cache_key(index_name)
+        BaseFetcher.cache.set(
+            cache_key,
+            {
+                "kind": "a_index_lookup_failure",
+                "schema_version": cls.A_INDEX_CACHE_SCHEMA_VERSION,
+                "message": str(message),
+            },
+            ttl=cls.A_INDEX_LOOKUP_NEGATIVE_CACHE_TTL,
+        )
+
+    @staticmethod
+    def _is_negative_a_index_lookup_error(error: Exception) -> bool:
+        message = str(error)
+        return any(
+            marker in message
+            for marker in (
+                "映射到多个A股指数代码",
+                "无法映射到A股指数代码",
+                "指数名称不能为空",
+            )
+        )
+
+    @classmethod
+    def _append_unresolved_equity_candidate(
+        cls,
+        unresolved_components: list[dict[str, Any]],
+        seen_unresolved: set[tuple[str, str]],
+        *,
+        name: str,
+        market: str,
+        source_text: str,
+        start: int,
+        end: int,
+        resolution_error: Exception,
+    ):
+        normalized_name = cls._normalize_index_name(name)
+        if normalized_name == "":
+            return
+        unresolved_key = (market, normalized_name)
+        if unresolved_key in seen_unresolved:
+            return
+        seen_unresolved.add(unresolved_key)
+        unresolved_components.append(
+            {
+                "name": str(name),
+                "market": str(market),
+                "raw_weight_pct": cls._extract_weight_nearby(source_text, start, end),
+                "position": start,
+                "match_end": end,
+                "resolution_error": str(resolution_error),
+            }
+        )
+
+    @staticmethod
+    def _format_unresolved_weighted_components(unresolved_components: list[dict[str, Any]]) -> str:
+        return ", ".join(
+            f"{item['name']}(weight={item['raw_weight_pct']})"
+            for item in unresolved_components
+            if item.get("raw_weight_pct") is not None
+        )
+
+    @classmethod
+    def _is_formula_like_dynamic_a_index_candidate(
+        cls,
+        source_text: str,
+        start: int,
+        end: int,
+        candidate_name: str,
+    ) -> bool:
+        candidate = str(candidate_name).strip()
+        if candidate == "" or "指数" not in candidate:
+            return False
+        if len(candidate) < cls.DYNAMIC_A_INDEX_MIN_NAME_LENGTH:
+            return False
+        if cls._is_non_equity_benchmark_text(candidate):
+            return False
+        if candidate in cls.DYNAMIC_A_INDEX_EXCLUDED_CANDIDATES:
+            return False
+        if any(token in candidate for token in cls.DYNAMIC_A_INDEX_EXPLANATORY_TOKENS):
+            return False
+
+        left_context = source_text[max(0, start - 16):start]
+        right_context = source_text[end:min(len(source_text), end + 16)]
+        recent_left_context = left_context[-10:]
+        if any(token in recent_left_context for token in cls.DYNAMIC_A_INDEX_LEFT_CONTEXT_EXCLUDED_TOKENS):
+            return False
+        context_text = f"{left_context}{right_context}"
+        return cls.DYNAMIC_A_INDEX_CONTEXT_PATTERN.search(context_text) is not None
 
     @staticmethod
     def _extract_weight_nearby(source_text: str, start: int, end: int) -> float | None:
@@ -541,59 +949,72 @@ class FundFetcher(BaseFetcher):
             deduped.append((code, name))
         return deduped
 
-    @BaseFetcher.with_cache(ttl=86400)
     @BaseFetcher.retry_on_error(max_retries=3)
     def _lookup_a_index_code_by_name(self, index_name: str) -> dict[str, str]:
         target_name = str(index_name).strip()
+        calibrated = self._resolve_a_index_code_from_calibration(target_name)
+        if calibrated is not None:
+            self._set_cached_a_index_lookup_success(target_name, calibrated)
+            return calibrated
+        cached_success = self._get_cached_a_index_lookup_success(target_name)
+        if cached_success is not None:
+            return cached_success
+        cached_failure = self._get_cached_a_index_lookup_failure(target_name)
+        if cached_failure is not None:
+            raise ValueError(cached_failure)
         if target_name == "":
             raise ValueError("指数名称不能为空")
 
-        target_normalized = self._normalize_index_name(target_name)
-        exact_matches: list[tuple[str, str]] = []
-        normalized_matches: list[tuple[str, str]] = []
-        fuzzy_matches: list[tuple[str, str]] = []
+        try:
+            target_normalized_full = self._normalize_index_name(target_name, strip_index_suffix=False)
+            target_normalized = self._normalize_index_name(target_name)
+            exact_matches: list[tuple[str, str]] = []
+            normalized_exact_matches: list[tuple[str, str]] = []
+            normalized_stripped_matches: list[tuple[str, str]] = []
+            catalog_snapshot = self.get_shared_a_index_catalog_snapshot()
+            catalog_records = catalog_snapshot.get("records", [])
 
-        for symbol in self.A_INDEX_SPOT_SYMBOL_CANDIDATES:
-            index_df = ak.stock_zh_index_spot_em(symbol=symbol)
-            if "名称" not in index_df.columns or "代码" not in index_df.columns:
-                continue
-            for _, row in index_df[["名称", "代码"]].dropna().drop_duplicates().iterrows():
-                name = str(row["名称"]).strip()
-                code = str(row["代码"]).strip()
-                if name == "" or not (len(code) == 6 and code.isdigit()):
+            for record in catalog_records:
+                name = str(record.get("name", "")).strip()
+                code = str(record.get("code", "")).strip()
+                normalized_name = str(record.get("normalized_name", "")).strip()
+                normalized_name_full = self._normalize_index_name(name, strip_index_suffix=False)
+                if name == "" or normalized_name == "" or normalized_name_full == "":
                     continue
-                if self._is_non_equity_benchmark_text(name):
-                    continue
-
-                normalized_name = self._normalize_index_name(name)
-                record = (code, name)
+                candidate = (code, name)
                 if name == target_name:
-                    exact_matches.append(record)
+                    exact_matches.append(candidate)
+                elif normalized_name_full == target_normalized_full:
+                    normalized_exact_matches.append(candidate)
                 elif normalized_name == target_normalized:
-                    normalized_matches.append(record)
-                elif target_normalized in normalized_name or normalized_name in target_normalized:
-                    fuzzy_matches.append(record)
+                    normalized_stripped_matches.append(candidate)
 
-        exact_matches = self._dedupe_index_records(exact_matches)
-        normalized_matches = self._dedupe_index_records(normalized_matches)
-        fuzzy_matches = self._dedupe_index_records(fuzzy_matches)
+            exact_matches = self._dedupe_index_records(exact_matches)
+            normalized_exact_matches = self._dedupe_index_records(normalized_exact_matches)
+            normalized_stripped_matches = self._dedupe_index_records(normalized_stripped_matches)
 
-        for candidates, reason in (
-            (exact_matches, "精确名称"),
-            (normalized_matches, "规范化名称"),
-            (fuzzy_matches, "模糊名称"),
-        ):
-            if len(candidates) == 1:
-                code, matched_name = candidates[0]
-                logger.debug(f"A股指数名称查码成功: {target_name} -> {matched_name} ({code}), reason={reason}")
-                return {"code": code, "name": matched_name}
-            if len(candidates) > 1:
-                raise ValueError(
-                    f"已识别指数名称 {target_name}，但映射到多个A股指数代码: "
-                    + ", ".join(f"{name}({code})" for code, name in candidates)
-                )
+            for candidates, reason in (
+                (exact_matches, "精确名称"),
+                (normalized_exact_matches, "规范化名称"),
+                (normalized_stripped_matches, "去尾缀规范化名称"),
+            ):
+                if len(candidates) == 1:
+                    code, matched_name = candidates[0]
+                    logger.debug(f"A股指数名称查码成功: {target_name} -> {matched_name} ({code}), reason={reason}")
+                    resolved = {"code": code, "name": matched_name}
+                    self._set_cached_a_index_lookup_success(target_name, resolved)
+                    return resolved
+                if len(candidates) > 1:
+                    raise ValueError(
+                        f"已识别指数名称 {target_name}，但映射到多个A股指数代码: "
+                        + ", ".join(f"{name}({code})" for code, name in candidates)
+                    )
 
-        raise ValueError(f"已识别指数名称 {target_name}，但无法映射到A股指数代码")
+            raise ValueError(f"已识别指数名称 {target_name}，但无法映射到A股指数代码")
+        except Exception as error:
+            if self._is_negative_a_index_lookup_error(error):
+                self._set_cached_a_index_lookup_failure(target_name, str(error))
+            raise
 
     def _resolve_index_code_from_alias_entry(self, entry: dict[str, Any]) -> tuple[str, str]:
         code = entry.get("code")
@@ -608,16 +1029,23 @@ class FundFetcher(BaseFetcher):
         self,
         source_text: str,
         allowed_markets: set[str] | None = None,
-    ) -> list[dict[str, Any]]:
+        *,
+        return_unresolved: bool = False,
+    ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         normalized_source_text = str(source_text).strip()
         if normalized_source_text == "":
+            if return_unresolved:
+                return [], []
             return []
 
         searchable_text = normalized_source_text.lower()
         raw_components: list[dict[str, Any]] = []
+        unresolved_components: list[dict[str, Any]] = []
         occupied_spans: list[tuple[int, int]] = []
         seen_codes = set()
         seen_names = set()
+        attempted_a_lookup_names = set()
+        seen_unresolved = set()
 
         alias_entries: list[tuple[int, dict[str, Any], str]] = []
         for entry in INDEX_ALIAS_CATALOG:
@@ -635,9 +1063,25 @@ class FundFetcher(BaseFetcher):
                 start, end = match.span()
                 if any(not (end <= span_start or start >= span_end) for span_start, span_end in occupied_spans):
                     continue
+                if str(entry.get("market", "")).strip() == "A股" and not entry.get("code"):
+                    attempted_name = self._normalize_index_name(str(entry.get("canonical_name", alias)))
+                    if attempted_name != "":
+                        if attempted_name in attempted_a_lookup_names:
+                            continue
+                        attempted_a_lookup_names.add(attempted_name)
                 try:
                     code, resolved_name = self._resolve_index_code_from_alias_entry(entry)
                 except Exception as e:
+                    self._append_unresolved_equity_candidate(
+                        unresolved_components,
+                        seen_unresolved,
+                        name=str(entry.get("canonical_name", alias)),
+                        market=str(entry.get("market", "")),
+                        source_text=normalized_source_text,
+                        start=start,
+                        end=end,
+                        resolution_error=e,
+                    )
                     logger.debug(f"指数别名解析失败: alias={alias}, reason={e}")
                     continue
                 if code in seen_codes:
@@ -667,14 +1111,30 @@ class FundFetcher(BaseFetcher):
                 if any(not (end <= span_start or start >= span_end) for span_start, span_end in occupied_spans):
                     continue
                 candidate_name = str(match.group(1)).strip()
-                if candidate_name == "" or self._is_non_equity_benchmark_text(candidate_name):
+                if not self._is_formula_like_dynamic_a_index_candidate(
+                    normalized_source_text,
+                    start,
+                    end,
+                    candidate_name,
+                ):
                     continue
                 normalized_name = self._normalize_index_name(candidate_name)
-                if normalized_name in seen_names:
+                if normalized_name in seen_names or normalized_name in attempted_a_lookup_names:
                     continue
+                attempted_a_lookup_names.add(normalized_name)
                 try:
                     resolved = self._lookup_a_index_code_by_name(candidate_name)
                 except Exception as e:
+                    self._append_unresolved_equity_candidate(
+                        unresolved_components,
+                        seen_unresolved,
+                        name=candidate_name,
+                        market="A股",
+                        source_text=normalized_source_text,
+                        start=start,
+                        end=end,
+                        resolution_error=e,
+                    )
                     logger.debug(f"动态A股指数查码失败: {candidate_name}, reason={e}")
                     continue
                 code = str(resolved["code"])
@@ -704,6 +1164,8 @@ class FundFetcher(BaseFetcher):
                     for item in raw_components
                 )
             )
+        if return_unresolved:
+            return raw_components, unresolved_components
         return raw_components
 
     def _normalize_weighted_proxy_components(
@@ -920,30 +1382,74 @@ class FundFetcher(BaseFetcher):
         raise ValueError(f"基金 {fund_info.get('code', '')} 无法从业绩比较基准识别高质量代理指数或代理篮子")
 
     def resolve_a_index_code(self, fund_info: dict[str, Any]) -> str:
-        analysis_text = self._build_analysis_text(fund_info)
-        raw_components = self.extract_benchmark_equity_index_components(analysis_text, allowed_markets={"A股"})
+        benchmark_text = self._get_benchmark_text(fund_info)
+        raw_components, unresolved_components = self.extract_benchmark_equity_index_components(
+            benchmark_text,
+            allowed_markets={"A股"},
+            return_unresolved=True,
+        )
+        unresolved_weighted_components = [
+            item for item in unresolved_components if item["market"] == "A股" and item.get("raw_weight_pct") is not None
+        ]
+        if unresolved_weighted_components:
+            unresolved_text = self._format_unresolved_weighted_components(unresolved_weighted_components)
+            raise ValueError(f"基金 {fund_info.get('code', '')} 的业绩比较基准存在未解析指数成分: {unresolved_text}")
         if raw_components:
             return str(raw_components[0]["code"])
-        code_match = re.search(r"(?<!\d)(\d{6})(?!\d)", analysis_text)
+        code_match = re.search(r"(?<!\d)(\d{6})(?!\d)", benchmark_text)
         if code_match:
             return code_match.group(1)
         raise ValueError(f"基金 {fund_info.get('code', '')} 未识别到任何A股权益指数名称，请检查业绩比较基准字段")
 
     def resolve_hk_index_code(self, fund_info: dict[str, Any]) -> str:
-        analysis_text = self._build_analysis_text(fund_info)
-        raw_components = self.extract_benchmark_equity_index_components(analysis_text, allowed_markets={"港股"})
+        benchmark_text = self._get_benchmark_text(fund_info)
+        raw_components, unresolved_components = self.extract_benchmark_equity_index_components(
+            benchmark_text,
+            allowed_markets={"港股"},
+            return_unresolved=True,
+        )
+        unresolved_weighted_components = [
+            item for item in unresolved_components if item["market"] == "港股" and item.get("raw_weight_pct") is not None
+        ]
+        if unresolved_weighted_components:
+            unresolved_text = self._format_unresolved_weighted_components(unresolved_weighted_components)
+            raise ValueError(f"基金 {fund_info.get('code', '')} 的业绩比较基准存在未解析指数成分: {unresolved_text}")
         if raw_components:
             return str(raw_components[0]["code"])
         raise ValueError(f"基金 {fund_info.get('code', '')} 未识别到任何港股权益指数名称，请检查业绩比较基准字段")
+
+    def resolve_index_tracking_target(self, fund_info: dict[str, Any]) -> dict[str, Any]:
+        fund_code = str(fund_info.get("code", "")).strip()
+        calibration = TRACKING_TARGET_CALIBRATIONS.get(fund_code)
+        if calibration is not None and self.is_etf_or_linked_fund(fund_info):
+            return {
+                "target_type": str(calibration["target_type"]),
+                "security_code": str(calibration["security_code"]),
+                "market": str(calibration.get("market", "A股")),
+                "tracking_name": str(calibration.get("tracking_name", fund_info.get("name", ""))).strip(),
+            }
+
+        return {
+            "target_type": "a_index",
+            "code": self.resolve_a_index_code(fund_info),
+            "market": "A股",
+            "tracking_name": "",
+        }
 
     def resolve_active_proxy_components(self, fund_info: dict[str, Any]) -> list[dict[str, Any]]:
         benchmark_text = str(fund_info.get("benchmark", "")).strip()
         if benchmark_text == "":
             raise ValueError(f"基金 {fund_info.get('code', '')} 缺少业绩比较基准，无法解析主动权益代理指数")
-        raw_components = self.extract_benchmark_equity_index_components(
+        raw_components, unresolved_components = self.extract_benchmark_equity_index_components(
             benchmark_text,
             allowed_markets={"A股", "港股"},
+            return_unresolved=True,
         )
+        strict_mode = BaseFetcher._get_strict_mode_latched()
+        unresolved_weighted_components = [item for item in unresolved_components if item.get("raw_weight_pct") is not None]
+        if strict_mode is not False and unresolved_weighted_components:
+            unresolved_text = self._format_unresolved_weighted_components(unresolved_weighted_components)
+            raise ValueError(f"基金 {fund_info.get('code', '')} 的权益业绩基准存在未解析指数成分: {unresolved_text}")
         return self._normalize_weighted_proxy_components(
             raw_components,
             benchmark_text,

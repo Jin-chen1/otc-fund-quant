@@ -6,16 +6,16 @@
 
 - 支持基金净值数据获取与本地 SQLite 缓存
 - 提供均线、RSI、MACD 等常用技术指标
-- 内置 V6 估值趋势混合策略与 Regime Adaptive 市场状态自适应策略
+- 内置 V6 估值趋势、Regime Adaptive 状态自适应、指数动量三类策略
 - 支持历史买卖信号分析与区间收益对比
-- 提供 Web 页面用于基金分析、策略切换和建议记录展示
+- 提供 Web 页面用于基金分析、按画像动态切换策略和建议记录展示
 
 ## 项目结构
 
 ```text
 otc_fund_quant/
 ├── analysis/      # 指标、信号、回测、图表相关逻辑
-├── config/        # 策略参数与配置加载
+├── config/        # 策略画像、参数配置与加载
 ├── core/          # 账户、持仓、订单、回测引擎
 ├── data/          # 数据加载与本地缓存
 ├── strategies/    # 交易策略实现
@@ -51,5 +51,8 @@ python -m web.app
 
 ## 说明
 
+- 优先读取 `config/strategy_profiles.json` 进行“基金类型 -> 画像 -> 策略 -> 参数”分层解析。
+- `config/strategy_params.json` 仍保留为兼容回退配置。
+- 需要从旧配置生成新画像配置时，可运行 `python tools/migrate_strategy_config.py --force`。
 - `data/*.db`、`web/*.db` 和 `results/` 下内容为本地缓存或运行产物，默认不纳入版本控制。
 - 具体运行命令和策略说明可参考 `命令.md`。

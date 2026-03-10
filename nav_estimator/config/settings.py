@@ -94,6 +94,40 @@ INDEX_ALIAS_CATALOG = [
     {"canonical_name": "道琼斯", "code": "DJIA", "market": "美股", "aliases": ["道琼斯", "dow jones"]},
 ]
 
+A_INDEX_ALIAS_CALIBRATIONS = [
+    {
+        "canonical_name": "中证医药卫生",
+        "preferred_code": "000933",
+        "alternate_codes": ["399933"],
+        "quote_channel": "a_share_numeric",
+        "market": "A股",
+        "aliases": ["中证医药卫生", "中证医药卫生指数"],
+    },
+    {
+        "canonical_name": "中证港股通综合",
+        "preferred_code": "930930",
+        "alternate_codes": [],
+        "quote_channel": "a_share_numeric",
+        "market": "A股",
+        "aliases": ["中证港股通综合", "中证港股通综合指数"],
+    },
+]
+
+TRACKING_TARGET_CALIBRATIONS = {
+    "018345": {
+        "target_type": "linked_etf_a_share",
+        "security_code": "562500",
+        "tracking_name": "中证机器人ETF",
+        "market": "A股",
+    },
+    "023639": {
+        "target_type": "linked_etf_a_share",
+        "security_code": "560880",
+        "tracking_name": "恒生A股电网设备ETF",
+        "market": "A股",
+    },
+}
+
 NON_EQUITY_BENCHMARK_KEYWORDS = [
     "中债",
     "国债",
@@ -161,6 +195,8 @@ class Settings:
         self.bond_stale_fallback = BOND_STALE_FALLBACK
         self.proxy_index_map = PROXY_INDEX_MAP
         self.index_alias_catalog = INDEX_ALIAS_CATALOG
+        self.a_index_alias_calibrations = A_INDEX_ALIAS_CALIBRATIONS
+        self.tracking_target_calibrations = TRACKING_TARGET_CALIBRATIONS
         self.non_equity_benchmark_keywords = NON_EQUITY_BENCHMARK_KEYWORDS
         self.qdii_proxy_baskets = QDII_PROXY_BASKETS
         self.bond_index_types = BOND_INDEX_TYPES

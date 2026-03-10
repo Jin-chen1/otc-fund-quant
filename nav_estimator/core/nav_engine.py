@@ -1,5 +1,6 @@
 """净值估算引擎。"""
 
+from collections import Counter
 from datetime import date, datetime
 from typing import Any
 
@@ -52,6 +53,52 @@ class NAVEngine:
 
         logger.info(f"净值估算引擎初始化完成，strict={self.strict}")
 
+    @staticmethod
+    def _is_tracking_target_quote_failure(error_message: str) -> bool:
+        return (
+            error_message.startswith("A股 ")
+            and "实时行情 主备实时源均不可用" in error_message
+            and ("行情数据结构异常" in error_message or "新浪实时行情为空" in error_message)
+        )
+
+    @staticmethod
+    def _log_estimation_failure(fund_code: str, error: Exception, *, stage: str) -> None:
+        error_message = str(error)
+        if NAVEngine._is_tracking_target_quote_failure(error_message):
+            logger.warning(f"基金 {fund_code} {stage}失败: 跟踪标的行情失败, error={error_message}")
+            return
+        if "实时行情源不支持该指数代码" in error_message:
+            logger.warning(f"基金 {fund_code} {stage}失败: 指数行情不支持, error={error_message}")
+            return
+        if (
+            "映射到多个A股指数代码" in error_message
+            or "无法映射到A股指数代码" in error_message
+            or "未识别到任何权益指数名称" in error_message
+            or "未识别到任何A股权益指数名称" in error_message
+            or "未识别到任何港股权益指数名称" in error_message
+            or "未解析指数成分" in error_message
+        ):
+            logger.warning(f"基金 {fund_code} {stage}失败: 基准解析失败, error={error_message}")
+            return
+        logger.error(f"基金 {fund_code} {stage}失败: {error_message}")
+
+    @staticmethod
+    def _classify_failure_reason(error_message: str) -> str:
+        if NAVEngine._is_tracking_target_quote_failure(error_message):
+            return "跟踪标的行情失败"
+        if "实时行情源不支持该指数代码" in error_message:
+            return "指数行情不支持"
+        if (
+            "映射到多个A股指数代码" in error_message
+            or "无法映射到A股指数代码" in error_message
+            or "未识别到任何权益指数名称" in error_message
+            or "未识别到任何A股权益指数名称" in error_message
+            or "未识别到任何港股权益指数名称" in error_message
+            or "未解析指数成分" in error_message
+        ):
+            return "基准解析失败"
+        return "其他"
+
     def run(self, fund_codes: list[str], strict: bool | None = None, target_date: str | None = None) -> pd.DataFrame:
         if strict is None:
             strict = self.strict
@@ -70,12 +117,15 @@ class NAVEngine:
                     fund_type = self.classifier.classify(code, fund_info=fund_info)
                     last_nav, nav_date = self.fund_fetcher.get_previous_official_nav(code, target_date=target_date)
                     active_proxy_components = None
+                    index_tracking_target = None
                     qdii_is_index_fund = None
                     qdii_market_profile = None
                     portfolio_holdings = None
                     if fund_type in {"active_a", "active_hk"}:
                         active_proxy_components = self.fund_fetcher.resolve_active_proxy_components(fund_info)
                         portfolio_holdings = self.fund_fetcher.get_portfolio_holdings(code)
+                    elif fund_type == "index_a":
+                        index_tracking_target = self.fund_fetcher.resolve_index_tracking_target(fund_info)
                     elif fund_type == "qdii":
                         qdii_market_profile = self._validate_supported_qdii_profile(code, fund_info)
                         qdii_is_index_fund = self.fund_fetcher.is_index_fund(fund_info)
@@ -92,13 +142,14 @@ class NAVEngine:
                             "last_nav": last_nav,
                             "nav_date": nav_date,
                             "active_proxy_components": active_proxy_components,
+                            "index_tracking_target": index_tracking_target,
                             "qdii_is_index_fund": qdii_is_index_fund,
                             "qdii_market_profile": qdii_market_profile,
                             "portfolio_holdings": portfolio_holdings,
                         }
                     )
                 except Exception as e:
-                    logger.error(f"基金 {code} 预取阶段失败: {e}")
+                    self._log_estimation_failure(code, e, stage="预取阶段")
                     results[index] = self._build_failure_result(
                         fund_code=code,
                         error=str(e),
@@ -124,7 +175,7 @@ class NAVEngine:
                     )
                     results[input_index] = result
                 except Exception as e:
-                    logger.error(f"基金 {code} 估算失败: {e}")
+                    self._log_estimation_failure(code, e, stage="估算阶段")
                     results[input_index] = self._build_failure_result(
                         fund_code=code,
                         error=str(e),
@@ -139,7 +190,18 @@ class NAVEngine:
         normalized_results = [item for item in results if item is not None]
         df = pd.DataFrame(normalized_results)
         if not df.empty and "status" in df.columns:
-            logger.info(f"批量估算完成，成功 {len(df[df['status'] != '失败'])} 只")
+            succeeded = len(df[df["status"] != "失败"])
+            failed = len(df[df["status"] == "失败"])
+            failure_counter = Counter(
+                self._classify_failure_reason(str(row.get("error", "")))
+                for row in df.to_dict(orient="records")
+                if row.get("status") == "失败"
+            )
+            logger.info(
+                f"批量估算完成 requested={len(fund_codes)} "
+                f"succeeded={succeeded} failed={failed} "
+                f"failure_breakdown={dict(failure_counter)}"
+            )
         else:
             logger.info("批量估算完成，无有效结果")
         return df
@@ -161,6 +223,7 @@ class NAVEngine:
         qdii_is_index_fund: bool | None = None
         fund_type: str | None = None
         qdii_market_profile: str | None = None
+        index_tracking_target: dict[str, Any] | None = None
 
         try:
             if preloaded_meta is None:
@@ -170,6 +233,8 @@ class NAVEngine:
                 portfolio_holdings = None
                 if fund_type in {"active_a", "active_hk"}:
                     active_proxy_components = self.fund_fetcher.resolve_active_proxy_components(fund_info)
+                elif fund_type == "index_a":
+                    index_tracking_target = self.fund_fetcher.resolve_index_tracking_target(fund_info)
                 elif fund_type == "qdii":
                     qdii_market_profile = self._validate_supported_qdii_profile(fund_code, fund_info)
                     qdii_is_index_fund = self.fund_fetcher.is_index_fund(fund_info)
@@ -181,6 +246,7 @@ class NAVEngine:
                 last_nav = preloaded_meta["last_nav"]
                 nav_date = preloaded_meta["nav_date"]
                 active_proxy_components = preloaded_meta.get("active_proxy_components")
+                index_tracking_target = preloaded_meta.get("index_tracking_target")
                 qdii_is_index_fund = preloaded_meta.get("qdii_is_index_fund")
                 qdii_market_profile = preloaded_meta.get("qdii_market_profile")
                 portfolio_holdings = preloaded_meta.get("portfolio_holdings")
@@ -199,12 +265,17 @@ class NAVEngine:
             estimator = self._get_estimator(fund_type)
 
             if fund_type == "index_a":
-                index_code = self.fund_fetcher.resolve_a_index_code(fund_info)
+                if index_tracking_target is None:
+                    index_tracking_target = self.fund_fetcher.resolve_index_tracking_target(fund_info)
+                index_code = str(index_tracking_target.get("code") or index_tracking_target.get("security_code", "")).strip()
+                if index_code == "":
+                    raise ValueError(f"基金 {fund_code} 缺少有效跟踪标的代码")
                 estimate_kwargs = {
                     "fund_code": fund_code,
                     "last_nav": last_nav,
                     "nav_date": nav_date,
                     "index_code": index_code,
+                    "tracking_target": index_tracking_target,
                     "target_date": target_date,
                     "fund_info": fund_info,
                     "strict": strict,
@@ -402,8 +473,19 @@ class NAVEngine:
 
             elif fund_type == "index_a":
                 try:
-                    code = self.fund_fetcher.resolve_a_index_code(fund_info)
-                    requirements["a_index_codes"].add(code)
+                    tracking_target = item.get("index_tracking_target")
+                    if tracking_target is None:
+                        tracking_target = self.fund_fetcher.resolve_index_tracking_target(fund_info)
+                    target_type = str(tracking_target.get("target_type", "a_index"))
+                    if target_type == "linked_etf_a_share":
+                        security_code = str(tracking_target.get("security_code", "")).strip()
+                        if security_code != "":
+                            requirements["required_a_codes"].add(security_code)
+                            requirements["need_a_prices"] = True
+                    else:
+                        code = str(tracking_target.get("code", "")).strip()
+                        if code != "":
+                            requirements["a_index_codes"].add(code)
                 except Exception as e:
                     logger.warning(f"基金 {item['fund_code']} A股指数预解析失败，将在单基金阶段抛错: {e}")
 
