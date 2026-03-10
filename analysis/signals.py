@@ -13,9 +13,20 @@ from .indicators import (
     CHEAP_PERCENTILE,
     RSI_SELL_THRESHOLD,
 )
+from ..strategies.bond_plus_balance_strategy import evaluate_bond_plus_balance_signal
+from ..strategies.bond_stability_strategy import evaluate_bond_stability_signal
+from ..strategies.qdii_trend_strategy import evaluate_qdii_trend_signal
 
 # 同方向信号最小间隔天数
 SIGNAL_MIN_INTERVAL = 5
+
+
+def _get_strategy_min_rows(strategy: str) -> int:
+    if strategy == "index_momentum":
+        return 60
+    if strategy in {"bond_stability", "qdii_trend", "bond_plus_balance"}:
+        return 140
+    return 250
 
 
 def generate_recommendation(history_df: pd.DataFrame, params: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -135,6 +146,7 @@ def generate_recommendation_regime(history_df: pd.DataFrame, params: Dict[str, A
         "RANGE": "震荡盘整（ADX≤25，无明确趋势）",
     }
 
+
     reasons = []
 
     # --- 策略逻辑：根据 regime 调整买卖阈值 ---
@@ -250,6 +262,58 @@ def generate_recommendation_regime(history_df: pd.DataFrame, params: Dict[str, A
     }
 
 
+def generate_recommendation_bond_stability(history_df: pd.DataFrame, params: Dict[str, Any] = None) -> Dict[str, Any]:
+    return evaluate_bond_stability_signal(history_df, params=params)
+
+
+def generate_recommendation_qdii_trend(history_df: pd.DataFrame, params: Dict[str, Any] = None) -> Dict[str, Any]:
+    return evaluate_qdii_trend_signal(history_df, params=params)
+
+
+def generate_recommendation_bond_plus_balance(history_df: pd.DataFrame, params: Dict[str, Any] = None) -> Dict[str, Any]:
+    return evaluate_bond_plus_balance_signal(history_df, params=params)
+
+
+def validate_recommendation_payload(recommendation: Dict[str, Any], strategy: str) -> Dict[str, Any]:
+    """校验并归一化策略生成器返回值，避免下游处理时结构不稳定。"""
+    if not isinstance(recommendation, dict):
+        raise ValueError(f"策略 {strategy} 返回了非法推荐结果类型: {type(recommendation).__name__}")
+
+    normalized = dict(recommendation)
+    missing_keys = {"action", "reason"} - set(normalized.keys())
+    if missing_keys:
+        missing = ", ".join(sorted(missing_keys))
+        raise ValueError(f"策略 {strategy} 返回的推荐结果缺少字段: {missing}")
+
+    action = str(normalized.get("action", "")).strip().upper()
+    if action not in {"BUY", "SELL", "HOLD"}:
+        raise ValueError(f"策略 {strategy} 返回了非法 action: {normalized.get('action')}")
+    normalized["action"] = action
+
+    reason = normalized.get("reason")
+    if reason is None:
+        raise ValueError(f"策略 {strategy} 返回的推荐结果缺少有效 reason")
+    normalized["reason"] = str(reason).strip() or "无明确理由"
+
+    buy_score = normalized.get("buy_score", 0)
+    try:
+        normalized["buy_score"] = int(buy_score or 0)
+    except (TypeError, ValueError):
+        normalized["buy_score"] = 0
+
+    normalized["sell_signal"] = bool(normalized.get("sell_signal", False))
+
+    indicators = normalized.get("indicators")
+    if indicators is None:
+        normalized["indicators"] = {}
+    elif not isinstance(indicators, dict):
+        raise ValueError(f"策略 {strategy} 返回了非法 indicators 类型: {type(indicators).__name__}")
+    else:
+        normalized["indicators"] = indicators
+
+    return normalized
+
+
 def generate_weekly_review(history_df: pd.DataFrame, days: int = 7,
                            strategy: str = "v6",
                            params: Dict[str, Any] = None) -> list:
@@ -263,7 +327,7 @@ def generate_weekly_review(history_df: pd.DataFrame, days: int = 7,
     Returns:
         列表，每项包含 date, action, reason, nav, next_nav, change_pct, correct
     """
-    min_rows = 60 if strategy == "index_momentum" else 250
+    min_rows = _get_strategy_min_rows(strategy)
     if len(history_df) < min_rows + 10:
         return []
 
@@ -277,7 +341,7 @@ def generate_weekly_review(history_df: pd.DataFrame, days: int = 7,
 
         # 用截至第 total-i 天的数据生成信号
         hist_slice = history_df.iloc[: total - i + 1]
-        rec = _rec_fn(hist_slice, params=params)
+        rec = validate_recommendation_payload(_rec_fn(hist_slice, params=params), strategy)
 
         signal_date = hist_slice.iloc[-1]["date"]
         signal_nav = float(hist_slice.iloc[-1]["nav"])
@@ -333,7 +397,7 @@ def generate_signal_points(history_df: pd.DataFrame, days: int = 1250,
         }
     """
     empty = {"buy_dates": [], "buy_navs": [], "sell_dates": [], "sell_navs": [], "records": []}
-    min_rows = 60 if strategy == "index_momentum" else 250
+    min_rows = _get_strategy_min_rows(strategy)
     if len(history_df) < min_rows + 10:
         return empty
 
@@ -364,7 +428,7 @@ def generate_signal_points(history_df: pd.DataFrame, days: int = 1250,
             continue
 
         hist_slice = history_df.iloc[:idx + 1]
-        rec = _rec_fn(hist_slice, params=params)
+        rec = validate_recommendation_payload(_rec_fn(hist_slice, params=params), strategy)
         nav_val = float(hist_slice.iloc[-1]["nav"])
 
         if rec["action"] == "BUY":
@@ -423,8 +487,14 @@ def _get_rec_fn(strategy: str):
     """根据策略名返回对应的推荐函数。"""
     if strategy == "regime_adaptive":
         return generate_recommendation_regime
-    elif strategy == "index_momentum":
+    if strategy == "index_momentum":
         return generate_recommendation_index_momentum
+    if strategy == "bond_stability":
+        return generate_recommendation_bond_stability
+    if strategy == "qdii_trend":
+        return generate_recommendation_qdii_trend
+    if strategy == "bond_plus_balance":
+        return generate_recommendation_bond_plus_balance
     return generate_recommendation
 
 

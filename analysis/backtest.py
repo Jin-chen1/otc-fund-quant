@@ -7,9 +7,34 @@ import pandas as pd
 from datetime import date as _date, timedelta
 
 from ..core.account import Account
+from ..strategies.bond_plus_balance_strategy import BondPlusBalanceStrategy
+from ..strategies.bond_stability_strategy import BondStabilityStrategy
+from ..strategies.qdii_trend_strategy import QDIITrendStrategy
 from ..strategies.trend_strategy import ValuationTrendHybridStrategy
 from ..strategies.regime_adaptive_strategy import RegimeAdaptiveStrategy
 from ..strategies.index_momentum_strategy import IndexMomentumStrategy
+
+
+def _get_strategy_min_history(strategy: str) -> int:
+    if strategy == "index_momentum":
+        return 60
+    if strategy in {"bond_stability", "qdii_trend", "bond_plus_balance"}:
+        return 140
+    return 250
+
+
+def _build_strategy(strategy: str, account: Account, fund_code: str, params: dict | None):
+    if strategy == "index_momentum":
+        return IndexMomentumStrategy(account, fund_code, params=params)
+    if strategy == "regime_adaptive":
+        return RegimeAdaptiveStrategy(account, fund_code, params=params)
+    if strategy == "bond_stability":
+        return BondStabilityStrategy(account, fund_code, params=params)
+    if strategy == "qdii_trend":
+        return QDIITrendStrategy(account, fund_code, params=params)
+    if strategy == "bond_plus_balance":
+        return BondPlusBalanceStrategy(account, fund_code, params=params)
+    return ValuationTrendHybridStrategy(account, fund_code, params=params)
 
 
 def calc_period_returns(history_df: pd.DataFrame, strategy: str = "v6",
@@ -38,7 +63,8 @@ def calc_period_returns(history_df: pd.DataFrame, strategy: str = "v6",
     df["nav"] = df["nav"].astype(float)
     df = df[df["date"] <= today].sort_values("date").reset_index(drop=True)
 
-    min_data = 70 if strategy == "index_momentum" else 260
+    min_hist = _get_strategy_min_history(strategy)
+    min_data = min_hist + 10
     if len(df) < min_data:
         return []
 
@@ -62,7 +88,6 @@ def calc_period_returns(history_df: pd.DataFrame, strategy: str = "v6",
 
         # 找到回测起始行（需要250行历史做指标预热）
         start_idx = None
-        min_hist = 60 if strategy == "index_momentum" else 250
         for i in range(len(df)):
             if df.iloc[i]["date"] >= cutoff and i >= min_hist:
                 start_idx = i
@@ -82,12 +107,7 @@ def calc_period_returns(history_df: pd.DataFrame, strategy: str = "v6",
 
         # 创建全新的账户和策略实例
         account = Account(initial_cash=INITIAL_CASH)
-        if strategy == "index_momentum":
-            strat = IndexMomentumStrategy(account, FUND_CODE, params=params)
-        elif strategy == "regime_adaptive":
-            strat = RegimeAdaptiveStrategy(account, FUND_CODE, params=params)
-        else:
-            strat = ValuationTrendHybridStrategy(account, FUND_CODE, params=params)
+        strat = _build_strategy(strategy, account, FUND_CODE, params)
 
         # 模拟引擎循环（T+1结算）
         pending_buy = 0.0

@@ -22,6 +22,7 @@ from otc_fund_quant.nav_estimator.core.batch_context import BatchContext
 from otc_fund_quant.nav_estimator.core.fund_classifier import FundClassifier
 from otc_fund_quant.nav_estimator.core.quality_gate import QualityGateError
 from otc_fund_quant.nav_estimator.core.nav_engine import NAVEngine
+from otc_fund_quant.config import loader as strategy_loader
 from otc_fund_quant.config.loader import ResolvedStrategyContext
 from otc_fund_quant.nav_estimator.config.settings import CACHE_DIR
 from otc_fund_quant.nav_estimator.data.fetcher.base_fetcher import BaseFetcher
@@ -62,9 +63,12 @@ def _resolved_strategy_context(
     available_ids: list[str] | None = None,
 ):
     catalog_map = {
-        "v6": {"id": "v6", "label": "V6 估值趋势", "description": "desc-v6"},
+        "v6": {"id": "v6", "label": "估值趋势", "description": "desc-v6"},
         "regime_adaptive": {"id": "regime_adaptive", "label": "状态自适应", "description": "desc-regime"},
         "index_momentum": {"id": "index_momentum", "label": "指数动量", "description": "desc-index"},
+        "bond_stability": {"id": "bond_stability", "label": "纯债稳健", "description": "desc-bond"},
+        "qdii_trend": {"id": "qdii_trend", "label": "QDII 趋势", "description": "desc-qdii"},
+        "bond_plus_balance": {"id": "bond_plus_balance", "label": "固收+平衡", "description": "desc-bond-plus"},
     }
     return ResolvedStrategyContext(
         fund_code=fund_code,
@@ -1818,6 +1822,80 @@ def test_analyze_api_smoke_unchanged():
     generator.assert_called_once()
 
 
+def test_analyze_api_rejects_invalid_recommendation_payload():
+    client = _client()
+    history_df = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=20).date,
+            "nav": [1 + idx * 0.01 for idx in range(20)],
+        }
+    )
+    context = _resolved_strategy_context()
+
+    with patch.object(web_app, "resolve_strategy_context", return_value=context), \
+         patch.object(web_app.loader, "update_db"), \
+         patch.object(web_app, "_get_fund_history", return_value=history_df), \
+         patch.object(web_app, "get_strategy_definition", return_value=SimpleNamespace(generator=MagicMock(return_value=None))):
+        response = client.post("/api/analyze", json={"fund_code": "007343", "strategy": "v6"})
+
+    assert response.status_code == 500
+    payload = response.get_json()
+    assert "策略 v6 返回了非法推荐结果类型: NoneType" in payload["error"]
+
+
+def test_analyze_api_normalizes_recommendation_payload_and_indicator_keys():
+    client = _client()
+    history_df = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=20).date,
+            "nav": [1 + idx * 0.01 for idx in range(20)],
+        }
+    )
+    context = _resolved_strategy_context()
+    recommendation = {
+        "action": "hold",
+        "reason": "normalized",
+        "indicators": {
+            "rsi": 52.5,
+            "ma20": float("nan"),
+        },
+    }
+
+    with patch.object(web_app, "resolve_strategy_context", return_value=context), \
+         patch.object(web_app.loader, "update_db"), \
+         patch.object(web_app, "_get_fund_history", return_value=history_df), \
+         patch.object(web_app, "get_strategy_definition", return_value=SimpleNamespace(generator=MagicMock(return_value=recommendation))), \
+         patch.object(web_app, "get_chart_data", return_value={"dates": [], "nav": [], "ma20": [], "ma60": []}), \
+         patch.object(web_app, "_get_latest_signal_date", return_value=""), \
+         patch.object(web_app, "generate_signal_points", return_value={"records": []}), \
+         patch.object(web_app, "_auto_save_reviews"), \
+         patch.object(web_app, "_get_all_signal_points", return_value={"buy_dates": [], "buy_navs": [], "sell_dates": [], "sell_navs": []}), \
+         patch.object(web_app, "_get_recommendations", return_value=[]), \
+         patch.object(web_app, "_get_backtest_cache", return_value=[]):
+        response = client.post("/api/analyze", json={"fund_code": "007343", "strategy": "v6"})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["recommendation"]["action"] == "HOLD"
+    assert payload["recommendation"]["buy_score"] == 0
+    assert payload["recommendation"]["sell_signal"] is False
+    assert set(payload["recommendation"]["indicators"].keys()) == set(web_app.INDICATOR_RESPONSE_KEYS)
+    assert payload["recommendation"]["indicators"]["rsi"] == 52.5
+    assert payload["recommendation"]["indicators"]["ma20"] is None
+    assert payload["recommendation"]["indicators"]["percentile"] is None
+
+
+def test_analyze_api_returns_clear_error_when_strategy_context_resolution_fails():
+    client = _client()
+
+    with patch.object(web_app, "resolve_strategy_context", side_effect=ValueError("画像 broken 未定义")):
+        response = client.post("/api/analyze", json={"fund_code": "007343", "strategy": "v6"})
+
+    assert response.status_code == 500
+    payload = response.get_json()
+    assert payload["error"] == "策略配置解析失败: 画像 broken 未定义"
+
+
 def test_analyze_api_returns_strategy_context():
     client = _client()
     history_df = pd.DataFrame(
@@ -2399,3 +2477,147 @@ def test_analyze_api_keeps_200_when_period_returns_background_state_errors():
     assert payload["period_returns_status"] == "error"
     assert payload["period_returns"] is None
     assert payload["period_returns_error"] == "区间收益计算失败: boom"
+
+
+@pytest.mark.parametrize(
+    ("fund_type", "requested_strategy", "expected_strategy", "expected_available_ids", "expected_param_subset"),
+    [
+        ("active_a", "", "regime_adaptive", ["v6", "regime_adaptive"], {"max_position_ratio": 0.8, "bull_dca_boost": 1.5}),
+        ("active_hk", "", "regime_adaptive", ["v6", "regime_adaptive"], {"max_position_ratio": 0.7, "bull_dca_boost": 1.3}),
+        ("index_a", "", "index_momentum", ["v6", "regime_adaptive", "index_momentum"], {"max_position_ratio": 0.95, "momentum_buy_threshold": 2}),
+        ("index_hk", "", "index_momentum", ["v6", "regime_adaptive", "index_momentum"], {"max_position_ratio": 0.85, "momentum_buy_threshold": 3}),
+        ("bond_pure", "", "bond_stability", ["bond_stability"], {"max_position_ratio": 0.6, "volatility_guard_window": 60}),
+        ("bond_plus", "", "bond_plus_balance", ["v6", "regime_adaptive", "bond_plus_balance"], {"max_position_ratio": 0.68, "drawdown_guard_threshold": 0.05}),
+        ("qdii", "", "qdii_trend", ["v6", "regime_adaptive", "qdii_trend"], {"max_position_ratio": 0.72, "trend_window_slow": 120}),
+    ],
+)
+def test_analyze_api_surfaces_category_specific_strategy_context(
+    monkeypatch,
+    fund_type,
+    requested_strategy,
+    expected_strategy,
+    expected_available_ids,
+    expected_param_subset,
+):
+    client = _client()
+    history_df = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=20).date,
+            "nav": [1 + idx * 0.01 for idx in range(20)],
+        }
+    )
+    recommendation = {
+        "action": "HOLD",
+        "reason": "category matrix",
+        "buy_score": 1,
+        "sell_signal": False,
+        "indicators": {
+            "current_nav": 1.2,
+            "percentile": 0.5,
+            "is_cheap_zone": False,
+            "gold_cross": False,
+            "death_cross": False,
+            "rsi": 50,
+            "macd_turn_positive": False,
+            "macd_5d_negative": False,
+            "above_ma20": True,
+            "above_ma20_3d": True,
+            "ma20": 1.1,
+            "ma60": 1.0,
+            "macd_hist": 0.01,
+            "atr": 0.02,
+            "adx": 18,
+            "market_regime": "RANGE",
+            "bb_upper": None,
+            "bb_lower": None,
+            "bb_position": 0.5,
+            "bb_width": 0.1,
+            "bb_squeeze": False,
+            "bb_touched_lower_3d": False,
+            "mom_5d": 0.01,
+            "mom_10d": 0.02,
+            "mom_20d": 0.03,
+            "atr_median": 0.02,
+        },
+    }
+
+    monkeypatch.setattr(strategy_loader, "_fetch_fund_info", lambda fund_code: {"name": "测试基金"})
+    monkeypatch.setattr(strategy_loader, "_classify_fund", lambda fund_code, fund_info=None: fund_type)
+    strategy_loader.reload_config()
+    monkeypatch.setattr(web_app, "resolve_strategy_context", strategy_loader.resolve_strategy_context)
+
+    with patch.object(web_app.loader, "update_db"), \
+         patch.object(web_app, "_get_fund_history", return_value=history_df), \
+         patch.object(web_app, "get_strategy_definition", return_value=SimpleNamespace(generator=MagicMock(return_value=recommendation))), \
+         patch.object(web_app, "get_chart_data", return_value={"dates": [], "nav": [], "ma20": [], "ma60": []}), \
+         patch.object(web_app, "_get_latest_signal_date", return_value=""), \
+         patch.object(web_app, "generate_signal_points", return_value={"records": []}), \
+         patch.object(web_app, "_auto_save_reviews"), \
+         patch.object(web_app, "_get_all_signal_points", return_value={"buy_dates": [], "buy_navs": [], "sell_dates": [], "sell_navs": []}), \
+         patch.object(web_app, "_get_recommendations", return_value=[]), \
+         patch.object(web_app, "_ensure_period_returns", return_value={"status": "ready", "period_returns": [], "error": None}):
+        response = client.post("/api/analyze", json={"fund_code": "999999", "strategy": requested_strategy})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["strategy"] == expected_strategy
+    assert [item["id"] for item in payload["strategy_context"]["available_strategies"]] == expected_available_ids
+    for key, expected_value in expected_param_subset.items():
+        assert payload["strategy_params"][key] == expected_value
+
+
+def test_analyze_api_adjusts_disallowed_strategy_for_bond_pure(monkeypatch):
+    client = _client()
+    history_df = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=20).date,
+            "nav": [1 + idx * 0.01 for idx in range(20)],
+        }
+    )
+    recommendation = {
+        "action": "HOLD",
+        "reason": "adjust bond pure",
+        "buy_score": 1,
+        "sell_signal": False,
+        "indicators": {
+            "current_nav": 1.2,
+            "percentile": 0.5,
+            "is_cheap_zone": False,
+            "gold_cross": False,
+            "death_cross": False,
+            "rsi": 50,
+            "macd_turn_positive": False,
+            "macd_5d_negative": False,
+            "above_ma20": True,
+            "above_ma20_3d": True,
+            "ma20": 1.1,
+            "ma60": 1.0,
+            "macd_hist": 0.01,
+            "atr": 0.02,
+            "adx": 18,
+            "market_regime": "RANGE",
+        },
+    }
+
+    monkeypatch.setattr(strategy_loader, "_fetch_fund_info", lambda fund_code: {"name": "测试纯债"})
+    monkeypatch.setattr(strategy_loader, "_classify_fund", lambda fund_code, fund_info=None: "bond_pure")
+    strategy_loader.reload_config()
+    monkeypatch.setattr(web_app, "resolve_strategy_context", strategy_loader.resolve_strategy_context)
+
+    with patch.object(web_app.loader, "update_db"), \
+         patch.object(web_app, "_get_fund_history", return_value=history_df), \
+         patch.object(web_app, "get_strategy_definition", return_value=SimpleNamespace(generator=MagicMock(return_value=recommendation))), \
+         patch.object(web_app, "get_chart_data", return_value={"dates": [], "nav": [], "ma20": [], "ma60": []}), \
+         patch.object(web_app, "_get_latest_signal_date", return_value=""), \
+         patch.object(web_app, "generate_signal_points", return_value={"records": []}), \
+         patch.object(web_app, "_auto_save_reviews"), \
+         patch.object(web_app, "_get_all_signal_points", return_value={"buy_dates": [], "buy_navs": [], "sell_dates": [], "sell_navs": []}), \
+         patch.object(web_app, "_get_recommendations", return_value=[]), \
+         patch.object(web_app, "_ensure_period_returns", return_value={"status": "ready", "period_returns": [], "error": None}):
+        response = client.post("/api/analyze", json={"fund_code": "999999", "strategy": "regime_adaptive"})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["strategy"] == "bond_stability"
+    assert payload["strategy_context"]["strategy_adjusted"] is True
+    assert payload["strategy_context"]["adjustment_reason"] == "当前画像不支持 regime_adaptive，已切换为默认策略"

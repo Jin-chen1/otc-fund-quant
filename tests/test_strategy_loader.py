@@ -62,6 +62,62 @@ def test_resolve_strategy_context_adjusts_disallowed_strategy(monkeypatch):
     assert context.adjustment_reason == "当前画像不支持 index_momentum，已切换为默认策略"
 
 
+@pytest.mark.parametrize(
+    ("fund_type", "profile_id", "default_strategy", "available_ids", "requested_strategy", "effective_strategy"),
+    [
+        ("active_a", "equity_active_cn", "regime_adaptive", ["v6", "regime_adaptive"], "", "regime_adaptive"),
+        ("active_hk", "equity_active_hk", "regime_adaptive", ["v6", "regime_adaptive"], "", "regime_adaptive"),
+        ("index_a", "equity_index_cn", "index_momentum", ["v6", "regime_adaptive", "index_momentum"], "", "index_momentum"),
+        ("index_hk", "equity_index_hk", "index_momentum", ["v6", "regime_adaptive", "index_momentum"], "", "index_momentum"),
+        ("bond_pure", "bond_pure", "bond_stability", ["bond_stability"], "", "bond_stability"),
+        ("bond_plus", "bond_plus", "bond_plus_balance", ["v6", "regime_adaptive", "bond_plus_balance"], "", "bond_plus_balance"),
+        ("qdii", "qdii_global", "qdii_trend", ["v6", "regime_adaptive", "qdii_trend"], "", "qdii_trend"),
+        ("bond_pure", "bond_pure", "bond_stability", ["bond_stability"], "regime_adaptive", "bond_stability"),
+        ("bond_plus", "bond_plus", "bond_plus_balance", ["v6", "regime_adaptive", "bond_plus_balance"], "regime_adaptive", "regime_adaptive"),
+        ("qdii", "qdii_global", "qdii_trend", ["v6", "regime_adaptive", "qdii_trend"], "regime_adaptive", "regime_adaptive"),
+    ],
+)
+def test_resolve_strategy_context_category_matrix(
+    monkeypatch,
+    fund_type,
+    profile_id,
+    default_strategy,
+    available_ids,
+    requested_strategy,
+    effective_strategy,
+):
+    monkeypatch.setattr(strategy_loader, "_fetch_fund_info", lambda fund_code: {"name": "测试基金"})
+    monkeypatch.setattr(strategy_loader, "_classify_fund", lambda fund_code, fund_info=None: fund_type)
+
+    context = strategy_loader.resolve_strategy_context("999999", requested_strategy)
+
+    assert context.profile_id == profile_id
+    assert context.default_strategy == default_strategy
+    assert context.effective_strategy == effective_strategy
+    assert [item["id"] for item in context.available_strategies] == available_ids
+
+
+@pytest.mark.parametrize(
+    ("fund_type", "strategy", "expected_subset"),
+    [
+        ("active_hk", "v6", {"max_position_ratio": 0.70, "dca_base_ratio": 0.03, "dca_interval": 9}),
+        ("active_hk", "regime_adaptive", {"bull_dca_boost": 1.30, "transition_buy_ratio": 0.12, "transition_sell_ratio": 0.35}),
+        ("index_hk", "index_momentum", {"max_position_ratio": 0.85, "momentum_buy_threshold": 3, "atr_scale_max": 1.6}),
+        ("bond_pure", "bond_stability", {"max_position_ratio": 0.60, "volatility_guard_window": 60, "drawdown_exit_threshold": 0.025}),
+        ("bond_plus", "bond_plus_balance", {"max_position_ratio": 0.68, "drawdown_guard_threshold": 0.05, "batch_ratios": [0.12, 0.08]}),
+        ("qdii", "qdii_trend", {"max_position_ratio": 0.72, "trend_window_slow": 120, "atr_exit_multiplier": 1.8}),
+    ],
+)
+def test_resolve_strategy_context_applies_category_specific_params(monkeypatch, fund_type, strategy, expected_subset):
+    monkeypatch.setattr(strategy_loader, "_fetch_fund_info", lambda fund_code: {"name": "测试基金"})
+    monkeypatch.setattr(strategy_loader, "_classify_fund", lambda fund_code, fund_info=None: fund_type)
+
+    context = strategy_loader.resolve_strategy_context("999999", strategy)
+
+    for key, expected_value in expected_subset.items():
+        assert context.strategy_params[key] == expected_value
+
+
 def test_profile_param_merge_precedence(monkeypatch, tmp_path):
     legacy_path = tmp_path / "strategy_params.json"
     profile_path = tmp_path / "strategy_profiles.json"
@@ -143,3 +199,35 @@ def test_load_strategy_params_falls_back_to_legacy_when_profile_missing(monkeypa
     params = strategy_loader.load_strategy_params("000001", "v6")
 
     assert params == {"max_position_ratio": 0.8, "dca_interval": 5}
+
+
+def test_resolve_strategy_context_uses_legacy_only_when_profile_file_missing(monkeypatch):
+    legacy_context = strategy_loader.ResolvedStrategyContext(
+        fund_code="000001",
+        fund_name="测试基金",
+        fund_type="active_a",
+        profile_id="legacy_default",
+        profile_label="兼容旧配置",
+        requested_strategy="v6",
+        effective_strategy="v6",
+        default_strategy="v6",
+        available_strategies=[{"id": "v6", "label": "估值趋势", "description": "desc"}],
+        strategy_params={"max_position_ratio": 0.8},
+        strategy_adjusted=False,
+        adjustment_reason=None,
+    )
+    monkeypatch.setattr(strategy_loader, "_resolve_profile_strategy_context", lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError("missing profile")) )
+    monkeypatch.setattr(strategy_loader, "_resolve_legacy_strategy_context", lambda *args, **kwargs: legacy_context)
+
+    context = strategy_loader.resolve_strategy_context("000001", "v6")
+
+    assert context.profile_id == "legacy_default"
+    assert context.effective_strategy == "v6"
+
+
+def test_resolve_strategy_context_does_not_silently_fallback_on_profile_errors(monkeypatch):
+    monkeypatch.setattr(strategy_loader, "_resolve_profile_strategy_context", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("画像 broken 未定义")) )
+    monkeypatch.setattr(strategy_loader, "_resolve_legacy_strategy_context", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not fallback")) )
+
+    with pytest.raises(ValueError, match="画像 broken 未定义"):
+        strategy_loader.resolve_strategy_context("000001", "v6")

@@ -42,6 +42,47 @@
       "trend_batch_ratios": [0.25, 0.20, 0.15],
       "tail_size": 200,
       "percentile_window": 150
+    },
+    "bond_stability": {
+      "max_position_ratio": 0.60,
+      "dca_base_ratio": 0.02,
+      "dca_interval": 10,
+      "volatility_guard_window": 60,
+      "pullback_buy_threshold": 0.015,
+      "drawdown_exit_threshold": 0.025,
+      "trend_confirm_window": 5,
+      "reentry_window": 3,
+      "min_history_days": 140,
+      "tail_size": 240,
+      "percentile_window": 120
+    },
+    "qdii_trend": {
+      "max_position_ratio": 0.72,
+      "dca_base_ratio": 0.03,
+      "momentum_entry_threshold": 2,
+      "trend_window_fast": 20,
+      "trend_window_mid": 60,
+      "trend_window_slow": 120,
+      "pullback_reentry_threshold": 0.04,
+      "atr_exit_multiplier": 1.8,
+      "sell_cooldown": 30,
+      "min_cooldown": 10,
+      "max_cooldown": 30,
+      "min_history_days": 140,
+      "tail_size": 260
+    },
+    "bond_plus_balance": {
+      "max_position_ratio": 0.68,
+      "dca_base_ratio": 0.03,
+      "dca_interval": 8,
+      "drawdown_guard_threshold": 0.05,
+      "momentum_confirm_threshold": 1,
+      "macd_negative_days": 4,
+      "batch_ratios": [0.12, 0.08],
+      "min_cooldown": 8,
+      "max_cooldown": 20,
+      "min_history_days": 140,
+      "tail_size": 240
     }
   },
   "007343": {

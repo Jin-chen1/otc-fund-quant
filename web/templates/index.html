@@ -555,15 +555,54 @@ function renderStrategyParams(params, isRegime) {
 
     const pctFmt = v => v != null ? (v * 100).toFixed(0) + '%' : '-';
     const isIndexMom = (currentStrategy === 'index_momentum');
+    const isBondStability = (currentStrategy === 'bond_stability');
+    const isQdiiTrend = (currentStrategy === 'qdii_trend');
+    const isBondPlusBalance = (currentStrategy === 'bond_plus_balance');
+    let items = [];
 
-    // 通用参数
-    const items = [
-        ['持仓上限', pctFmt(params.max_position_ratio)],
-        ['软止损', pctFmt(params.soft_stop_loss)],
-        ['硬止损', pctFmt(params.hard_stop_loss)],
-        ['冷静期', params.min_cooldown + '~' + params.max_cooldown + '天'],
-        ['DCA比例', pctFmt(params.dca_base_ratio)],
-    ];
+    if (isBondStability) {
+        items = [
+            ['持仓上限', pctFmt(params.max_position_ratio)],
+            ['DCA比例', pctFmt(params.dca_base_ratio)],
+            ['DCA间隔', (params.dca_interval || 10) + '天'],
+            ['波动守卫', (params.volatility_guard_window || 60) + '天'],
+            ['回撤买入', pctFmt(params.pullback_buy_threshold)],
+            ['退出回撤', pctFmt(params.drawdown_exit_threshold)],
+            ['趋势确认', (params.trend_confirm_window || 5) + '天'],
+            ['重入窗口', (params.reentry_window || 3) + '天'],
+        ];
+    } else if (isQdiiTrend) {
+        items = [
+            ['持仓上限', pctFmt(params.max_position_ratio)],
+            ['DCA比例', pctFmt(params.dca_base_ratio)],
+            ['动量阈值', params.momentum_entry_threshold || 2],
+            ['快/中/慢趋势', (params.trend_window_fast || 20) + '/' + (params.trend_window_mid || 60) + '/' + (params.trend_window_slow || 120)],
+            ['回撤重入', pctFmt(params.pullback_reentry_threshold)],
+            ['ATR退出', (params.atr_exit_multiplier || 1.8) + 'x'],
+            ['卖出冷却', (params.sell_cooldown || 30) + '天'],
+            ['冷静期', (params.min_cooldown || 10) + '~' + (params.max_cooldown || 30) + '天'],
+        ];
+    } else if (isBondPlusBalance) {
+        items = [
+            ['持仓上限', pctFmt(params.max_position_ratio)],
+            ['DCA比例', pctFmt(params.dca_base_ratio)],
+            ['DCA间隔', (params.dca_interval || 8) + '天'],
+            ['回撤防线', pctFmt(params.drawdown_guard_threshold)],
+            ['确认阈值', params.momentum_confirm_threshold || 1],
+            ['MACD连弱', (params.macd_negative_days || 4) + '天'],
+            ['分批比例', (params.batch_ratios || []).map(v => pctFmt(v)).join('/') || '-'],
+            ['冷静期', (params.min_cooldown || 8) + '~' + (params.max_cooldown || 20) + '天'],
+        ];
+    } else {
+        // 通用参数
+        items = [
+            ['持仓上限', pctFmt(params.max_position_ratio)],
+            ['软止损', pctFmt(params.soft_stop_loss)],
+            ['硬止损', pctFmt(params.hard_stop_loss)],
+            ['冷静期', params.min_cooldown + '~' + params.max_cooldown + '天'],
+            ['DCA比例', pctFmt(params.dca_base_ratio)],
+        ];
+    }
 
     if (isIndexMom) {
         // 指数动量专属参数
@@ -577,7 +616,7 @@ function renderStrategyParams(params, isRegime) {
         if (params.tail_size) {
             items.push(['指标窗口', params.tail_size + '天']);
         }
-    } else {
+    } else if (!isBondStability && !isQdiiTrend && !isBondPlusBalance) {
         // V6 / regime_adaptive 参数
         items.push(['DCA间隔', (params.dca_interval || 7) + '天']);
         items.push(['低估阈值', pctFmt(params.cheap_percentile)]);
@@ -873,40 +912,51 @@ function startPeriodReturnsPolling(context, analysisToken) {
 function renderIndicators(ind, isRegime) {
     if (!ind) return;
 
+    const isFiniteNumber = (value) => typeof value === 'number' && Number.isFinite(value);
+    const formatFixed = (value, digits) => isFiniteNumber(value) ? value.toFixed(digits) : '--';
+    const formatPercent = (value) => isFiniteNumber(value) ? (value * 100).toFixed(1) + '%' : '--';
+
     const pct = document.getElementById('ind-percentile');
-    pct.textContent = (ind.percentile * 100).toFixed(1) + '%';
-    pct.style.color = 'var(--accent-purple)';
+    pct.textContent = formatPercent(ind.percentile);
+    pct.style.color = isFiniteNumber(ind.percentile) ? 'var(--accent-purple)' : 'var(--text-muted)';
 
     const rsi = document.getElementById('ind-rsi');
-    rsi.textContent = ind.rsi.toFixed(1);
-    rsi.style.color = 'var(--accent-purple)';
+    rsi.textContent = formatFixed(ind.rsi, 1);
+    rsi.style.color = isFiniteNumber(ind.rsi) ? 'var(--accent-purple)' : 'var(--text-muted)';
 
     const ma20El = document.getElementById('ind-ma20');
-    ma20El.textContent = ind.ma20 ? ind.ma20.toFixed(4) : '--';
-    ma20El.style.color = 'var(--accent-purple)';
+    ma20El.textContent = formatFixed(ind.ma20, 4);
+    ma20El.style.color = isFiniteNumber(ind.ma20) ? 'var(--accent-purple)' : 'var(--text-muted)';
 
     const ma60El = document.getElementById('ind-ma60');
-    ma60El.textContent = ind.ma60 ? ind.ma60.toFixed(4) : '--';
-    ma60El.style.color = 'var(--accent-purple)';
+    ma60El.textContent = formatFixed(ind.ma60, 4);
+    ma60El.style.color = isFiniteNumber(ind.ma60) ? 'var(--accent-purple)' : 'var(--text-muted)';
 
     const cross = document.getElementById('ind-cross');
-    if (ind.gold_cross) { cross.textContent = '金叉 ↑'; cross.style.color = 'var(--accent-buy)'; }
-    else if (ind.death_cross) { cross.textContent = '死叉 ↓'; cross.style.color = 'var(--accent-sell)'; }
-    else { cross.textContent = ind.above_ma20 ? 'MA20上方' : 'MA20下方'; cross.style.color = 'var(--accent-purple)'; }
+    if (ind.gold_cross === true) { cross.textContent = '金叉 ↑'; cross.style.color = 'var(--accent-buy)'; }
+    else if (ind.death_cross === true) { cross.textContent = '死叉 ↓'; cross.style.color = 'var(--accent-sell)'; }
+    else if (ind.above_ma20 === true) { cross.textContent = 'MA20上方'; cross.style.color = 'var(--accent-purple)'; }
+    else if (ind.above_ma20 === false) { cross.textContent = 'MA20下方'; cross.style.color = 'var(--accent-purple)'; }
+    else { cross.textContent = '数据不足'; cross.style.color = 'var(--text-muted)'; }
 
     const macd = document.getElementById('ind-macd');
-    macd.textContent = ind.macd_hist > 0 ? '+' + ind.macd_hist.toFixed(4) : ind.macd_hist.toFixed(4);
-    macd.style.color = 'var(--accent-purple)';
+    if (isFiniteNumber(ind.macd_hist)) {
+        macd.textContent = ind.macd_hist > 0 ? '+' + ind.macd_hist.toFixed(4) : ind.macd_hist.toFixed(4);
+        macd.style.color = 'var(--accent-purple)';
+    } else {
+        macd.textContent = '--';
+        macd.style.color = 'var(--text-muted)';
+    }
 
     const adxEl = document.getElementById('ind-adx');
-    if (adxEl && ind.adx !== undefined) {
-        adxEl.textContent = ind.adx.toFixed(1);
-        adxEl.style.color = 'var(--accent-purple)';
+    if (adxEl) {
+        adxEl.textContent = formatFixed(ind.adx, 1);
+        adxEl.style.color = isFiniteNumber(ind.adx) ? 'var(--accent-purple)' : 'var(--text-muted)';
     }
     const atrEl = document.getElementById('ind-atr');
-    if (atrEl && ind.atr !== undefined) {
-        atrEl.textContent = ind.atr.toFixed(4);
-        atrEl.style.color = 'var(--accent-purple)';
+    if (atrEl) {
+        atrEl.textContent = formatFixed(ind.atr, 4);
+        atrEl.style.color = isFiniteNumber(ind.atr) ? 'var(--accent-purple)' : 'var(--text-muted)';
     }
 }
 

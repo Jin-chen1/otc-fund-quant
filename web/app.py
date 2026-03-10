@@ -30,6 +30,7 @@ from otc_fund_quant.data.loader import DataLoader
 from otc_fund_quant.data.sqlite_utils import connect_sqlite, run_sqlite_write_with_retry
 from otc_fund_quant.analysis.signals import (
     generate_signal_points,
+    validate_recommendation_payload,
 )
 from otc_fund_quant.analysis.backtest import calc_period_returns
 from otc_fund_quant.analysis.chart import get_chart_data
@@ -75,6 +76,17 @@ BACKTEST_EXECUTOR_WORKERS = 1
 BACKTEST_TASK_KEY = tuple[str, str, str]
 BACKTEST_PENDING_TTL = timedelta(minutes=15)
 BACKTEST_FINISHED_TTL = timedelta(minutes=10)
+INDICATOR_RESPONSE_KEYS = (
+    "current_nav", "percentile", "is_cheap_zone",
+    "gold_cross", "death_cross", "rsi",
+    "macd_turn_positive", "macd_5d_negative",
+    "above_ma20", "above_ma20_3d",
+    "ma20", "ma60", "macd_hist",
+    "atr", "adx", "market_regime",
+    "bb_upper", "bb_lower", "bb_position", "bb_width",
+    "bb_squeeze", "bb_touched_lower_3d",
+    "mom_5d", "mom_10d", "mom_20d", "atr_median",
+)
 
 _backtest_executor: ThreadPoolExecutor | None = None
 _backtest_executor_lock = threading.Lock()
@@ -231,6 +243,30 @@ def _save_backtest_cache(fund_code: str, strategy: str, end_date: str, results: 
 
 def _backtest_now() -> datetime:
     return datetime.now()
+
+
+def _normalize_indicator_value(value):
+    if value is None:
+        return None
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+
+    try:
+        is_na = pd.isna(value)
+    except Exception:
+        is_na = False
+
+    if isinstance(is_na, bool) and is_na:
+        return None
+    return value
+
+
+def _normalize_indicator_payload(indicators: dict[str, Any] | None) -> dict[str, Any]:
+    raw_indicators = indicators if isinstance(indicators, dict) else {}
+    return {
+        key: _normalize_indicator_value(raw_indicators.get(key))
+        for key in INDICATOR_RESPONSE_KEYS
+    }
 
 
 def _create_backtest_task(*, status: str, error: str | None = None, period_returns: list | None = None) -> dict[str, Any]:
@@ -1233,7 +1269,16 @@ def api_analyze():
 
     try:
         # 0. 加载策略配置参数
-        strategy_context = resolve_strategy_context(fund_code, requested_strategy)
+        try:
+            strategy_context = resolve_strategy_context(fund_code, requested_strategy)
+        except Exception as exc:
+            logger.exception(
+                "analyze_strategy_context_failed fund_code=%s requested_strategy=%s error=%s",
+                fund_code,
+                requested_strategy or "AUTO",
+                exc,
+            )
+            return jsonify({"error": f"策略配置解析失败: {str(exc)}"}), 500
         strategy = strategy_context.effective_strategy
         strategy_params = strategy_context.strategy_params
 
@@ -1251,7 +1296,10 @@ def api_analyze():
 
         # 4. 根据选择的策略生成今日建议
         strategy_definition = get_strategy_definition(strategy)
-        recommendation = strategy_definition.generator(history_df, params=strategy_params)
+        recommendation = validate_recommendation_payload(
+            strategy_definition.generator(history_df, params=strategy_params),
+            strategy,
+        )
 
         # 5. 获取图表数据
         chart_data = get_chart_data(history_df, days=500)
@@ -1269,19 +1317,7 @@ def api_analyze():
         # 8. 获取历史推荐记录
         rec_history = _get_recommendations(fund_code, strategy)
 
-        # 构造指标白名单
-        ind_keys = [
-            "current_nav", "percentile", "is_cheap_zone",
-            "gold_cross", "death_cross", "rsi",
-            "macd_turn_positive", "macd_5d_negative",
-            "above_ma20", "above_ma20_3d",
-            "ma20", "ma60", "macd_hist",
-            "atr", "adx", "market_regime",
-            # 布林带+动量指标
-            "bb_upper", "bb_lower", "bb_position", "bb_width",
-            "bb_squeeze", "bb_touched_lower_3d",
-            "mom_5d", "mom_10d", "mom_20d", "atr_median",
-        ]
+        normalized_indicators = _normalize_indicator_payload(recommendation.get("indicators"))
 
         # 9. 计算各周期策略回测收益（优先读缓存）
         cache_end_date = latest_date.strftime("%Y-%m-%d") if hasattr(latest_date, "strftime") else str(latest_date)
@@ -1311,10 +1347,7 @@ def api_analyze():
                 "reason": recommendation["reason"],
                 "buy_score": recommendation["buy_score"],
                 "sell_signal": recommendation["sell_signal"],
-                "indicators": {
-                    k: v for k, v in recommendation["indicators"].items()
-                    if k in ind_keys
-                },
+                "indicators": normalized_indicators,
             },
             "chart": chart_data,
             "signal_points": signal_points,
