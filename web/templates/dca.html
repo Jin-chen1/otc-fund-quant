@@ -499,6 +499,8 @@
 
         .positive-text { color: var(--accent-buy); }
         .negative-text { color: var(--accent-sell); }
+        .profit-amount-positive { color: var(--accent-sell); }
+        .profit-amount-negative { color: var(--accent-buy); }
         .neutral-text { color: var(--text-secondary); }
 
         .fund-metrics {
@@ -808,9 +810,13 @@ function profitClass(value) {
     return Number(value) > 0 ? 'positive-text' : 'negative-text';
 }
 
-function estimateClass(value) {
+function profitAmountClass(value) {
     if (value === null || value === undefined || Number.isNaN(Number(value)) || Number(value) === 0) return 'neutral-text';
-    return Number(value) > 0 ? 'positive-text' : 'negative-text';
+    return Number(value) > 0 ? 'profit-amount-positive' : 'profit-amount-negative';
+}
+
+function estimateClass(value) {
+    return profitAmountClass(value);
 }
 
 function setMessage(text, type = 'error') {
@@ -967,7 +973,8 @@ function renderFunds(funds) {
     empty.classList.add('hidden');
     container.innerHTML = funds.map(fund => {
         const tone = fund.profit_amount > 0 ? 'positive' : fund.profit_amount < 0 ? 'negative' : '';
-        const profitTone = profitClass(fund.profit_amount);
+        const profitTone = profitAmountClass(fund.profit_amount);
+        const profitAmountTone = profitAmountClass(fund.profit_amount);
         const fundCode = escapeHtml(fund.fund_code || '--');
         const fundName = fund.fund_name ? escapeHtml(fund.fund_name) : '';
         const navText = fund.latest_nav_date
@@ -1003,7 +1010,7 @@ function renderFunds(funds) {
                     </div>
                     <div style="text-align: right;">
                         <div class="muted" style="font-size: 12px; margin-bottom: 6px;">累计浮盈金额</div>
-                        <div class="mono ${profitTone}" style="font-size: 18px; font-weight: 700;">${fmtMoney(fund.profit_amount)}</div>
+                        <div class="mono ${profitAmountTone}" style="font-size: 18px; font-weight: 700;">${fmtMoney(fund.profit_amount)}</div>
                     </div>
                 </div>
                 <div class="fund-metrics">
