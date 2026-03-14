@@ -7,6 +7,7 @@ import os
 import sqlite3
 import json
 import math
+import copy
 import re
 import logging
 import threading
@@ -56,6 +57,7 @@ REC_DB_PATH = os.environ.get(
 
 DCA_STATUS_PENDING = "pending"
 DCA_STATUS_CONFIRMED = "confirmed"
+DCA_SNAPSHOT_STALE_TTL = timedelta(seconds=60)
 FUND_CODE_PATTERN = re.compile(r"^\d{6}$")
 NAV_ESTIMATOR_SUMMARY_KEYS = {
     "fund_code",
@@ -92,6 +94,17 @@ _backtest_executor: ThreadPoolExecutor | None = None
 _backtest_executor_lock = threading.Lock()
 _backtest_tasks: dict[BACKTEST_TASK_KEY, dict[str, Any]] = {}
 _backtest_tasks_lock = threading.Lock()
+_dca_snapshot_lock = threading.Lock()
+_dca_snapshot_thread: threading.Thread | None = None
+_dca_snapshot_state: dict[str, Any] = {
+    "payload": None,
+    "generated_at": None,
+    "last_sync_started_at": None,
+    "last_sync_completed_at": None,
+    "last_sync_error": None,
+    "is_syncing": False,
+    "dirty": True,
+}
 
 
 # ===== 数据库初始化 =====
@@ -791,6 +804,54 @@ def _get_fund_name_map(fund_codes: list[str]) -> dict[str, str | None]:
     return fund_name_map
 
 
+def _clone_dca_snapshot_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if payload is None:
+        return None
+    return copy.deepcopy(payload)
+
+
+def _serialize_dca_sync_time(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat(timespec="seconds")
+
+
+def _mark_dca_snapshot_dirty(*, invalidate_payload: bool = False):
+    with _dca_snapshot_lock:
+        _dca_snapshot_state["dirty"] = True
+        if invalidate_payload:
+            _dca_snapshot_state["payload"] = None
+            _dca_snapshot_state["generated_at"] = None
+
+
+def _build_dca_sync_meta(now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime.now()
+    with _dca_snapshot_lock:
+        payload = _dca_snapshot_state["payload"]
+        generated_at = _dca_snapshot_state["generated_at"]
+        last_sync_completed_at = _dca_snapshot_state["last_sync_completed_at"]
+        last_sync_error = _dca_snapshot_state["last_sync_error"]
+        is_syncing = bool(_dca_snapshot_state["is_syncing"])
+        dirty = bool(_dca_snapshot_state["dirty"])
+
+    is_stale = payload is None or generated_at is None or dirty
+    if not is_stale and now - generated_at > DCA_SNAPSHOT_STALE_TTL:
+        is_stale = True
+
+    return {
+        "is_syncing": is_syncing,
+        "is_stale": is_stale,
+        "last_sync_completed_at": _serialize_dca_sync_time(last_sync_completed_at),
+        "last_sync_error": last_sync_error,
+    }
+
+
+def _attach_dca_sync_meta(payload: dict[str, Any]) -> dict[str, Any]:
+    response_payload = _clone_dca_snapshot_payload(payload) or _empty_dca_snapshot()
+    response_payload["sync"] = _build_dca_sync_meta()
+    return response_payload
+
+
 def _empty_dca_snapshot():
     """返回空的定投看板数据结构。"""
     return {
@@ -808,10 +869,8 @@ def _empty_dca_snapshot():
     }
 
 
-def _get_dca_snapshot():
-    """汇总定投记录、基金净值和当前收益。"""
-    _sync_dca_records()
-
+def _build_dca_snapshot_from_db():
+    """从本地数据库构建定投看板快照，不触发同步。"""
     conn = connect_sqlite(REC_DB_PATH, row_factory=sqlite3.Row)
     try:
         rows = conn.execute("""
@@ -928,6 +987,78 @@ def _get_dca_snapshot():
         "funds": funds,
         "records": records,
     }
+
+
+def _cache_dca_snapshot_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    cached_payload = _clone_dca_snapshot_payload(payload) or _empty_dca_snapshot()
+    with _dca_snapshot_lock:
+        _dca_snapshot_state["payload"] = cached_payload
+        _dca_snapshot_state["generated_at"] = datetime.now()
+    return _clone_dca_snapshot_payload(cached_payload) or _empty_dca_snapshot()
+
+
+def _get_or_build_dca_snapshot_payload() -> dict[str, Any]:
+    with _dca_snapshot_lock:
+        cached_payload = _clone_dca_snapshot_payload(_dca_snapshot_state["payload"])
+    if cached_payload is not None:
+        return cached_payload
+    payload = _build_dca_snapshot_from_db()
+    return _cache_dca_snapshot_payload(payload)
+
+
+def _run_dca_snapshot_sync():
+    global _dca_snapshot_thread
+
+    try:
+        _sync_dca_records()
+        payload = _build_dca_snapshot_from_db()
+        with _dca_snapshot_lock:
+            completed_at = datetime.now()
+            _dca_snapshot_state["payload"] = _clone_dca_snapshot_payload(payload) or _empty_dca_snapshot()
+            _dca_snapshot_state["generated_at"] = completed_at
+            _dca_snapshot_state["last_sync_completed_at"] = completed_at
+            _dca_snapshot_state["last_sync_error"] = None
+            _dca_snapshot_state["dirty"] = False
+    except Exception as error:
+        logger.exception("dca_snapshot_sync_failed error=%s", error)
+        with _dca_snapshot_lock:
+            _dca_snapshot_state["last_sync_error"] = str(error)
+    finally:
+        with _dca_snapshot_lock:
+            _dca_snapshot_state["is_syncing"] = False
+            _dca_snapshot_thread = None
+
+
+def _start_dca_snapshot_sync_thread():
+    global _dca_snapshot_thread
+    thread = threading.Thread(target=_run_dca_snapshot_sync, name="dca-snapshot-sync", daemon=True)
+    _dca_snapshot_thread = thread
+    thread.start()
+
+
+def _schedule_dca_snapshot_sync_if_needed() -> bool:
+    if app.config.get("TESTING"):
+        return False
+
+    now = datetime.now()
+    with _dca_snapshot_lock:
+        payload = _dca_snapshot_state["payload"]
+        generated_at = _dca_snapshot_state["generated_at"]
+        is_syncing = bool(_dca_snapshot_state["is_syncing"])
+        dirty = bool(_dca_snapshot_state["dirty"])
+
+        is_stale = payload is None or generated_at is None or dirty
+        if not is_stale and now - generated_at > DCA_SNAPSHOT_STALE_TTL:
+            is_stale = True
+        if is_syncing or not is_stale:
+            return False
+
+        _dca_snapshot_state["is_syncing"] = True
+        _dca_snapshot_state["last_sync_started_at"] = now
+        _dca_snapshot_state["last_sync_error"] = None
+
+    _start_dca_snapshot_sync_thread()
+    return True
 
 
 def _get_latest_signal_date(fund_code: str, strategy: str = "v6") -> str:
@@ -1422,7 +1553,9 @@ def api_nav_estimator_estimate():
 def api_dca_portfolio():
     """获取定投看板汇总与明细。"""
     try:
-        return jsonify(_get_dca_snapshot())
+        payload = _get_or_build_dca_snapshot_payload()
+        _schedule_dca_snapshot_sync_if_needed()
+        return jsonify(_attach_dca_sync_meta(payload))
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1490,6 +1623,7 @@ def api_create_dca_record():
 
     run_sqlite_write_with_retry(_action, logger=logger, action_name="create_dca_record")
     record_id = record_holder["id"]
+    _mark_dca_snapshot_dirty(invalidate_payload=True)
 
     return jsonify({
         "id": record_id,
@@ -1521,6 +1655,7 @@ def api_delete_dca_record(record_id: int):
     if deleted == 0:
         return jsonify({"error": "记录不存在"}), 404
 
+    _mark_dca_snapshot_dirty(invalidate_payload=True)
     return jsonify({"success": True, "id": record_id})
 
 

@@ -61,7 +61,14 @@ class ActiveEquityEstimator(BaseEstimator):
             if market not in {"A股", "港股"}:
                 market = "港股" if code in {"HSI", "HSTECH"} else "A股"
             normalized_components.append(
-                {"code": code, "name": str(component.get("name", code)), "market": market, "weight": weight}
+                {
+                    "code": code,
+                    "name": str(component.get("name", code)),
+                    "market": market,
+                    "weight": weight,
+                    "target_type": str(component.get("target_type", "a_index")),
+                    "quote_code": str(component.get("quote_code", code)),
+                }
             )
             total_weight += weight
 
@@ -421,41 +428,77 @@ class ActiveEquityEstimator(BaseEstimator):
                 proxy_contribution = 0.0
                 for component in normalized_proxy_components:
                     component_code = component["code"]
+                    component_quote_code = str(component.get("quote_code", component_code))
                     component_name = component["name"]
                     component_market = component["market"]
+                    component_target_type = str(component.get("target_type", "a_index"))
                     component_ratio = float(component["weight"])
                     component_weight = proxy_weight * component_ratio
                     if strict:
-                        component_payload = (
-                            self.index_fetcher.get_hk_index_return_live(component_code, strict=True)
-                            if component_market == "港股"
-                            else self.index_fetcher.get_a_index_return_live(component_code, strict=True)
-                        )
-                        self._merge_live_source_meta(
-                            used_sources=used_sources,
-                            source_disagreements=source_disagreements,
-                            category="proxy_indices",
-                            payload=component_payload,
-                            item_code=component_code,
-                        )
+                        if component_market == "港股":
+                            component_payload = self.index_fetcher.get_hk_index_return_live(component_code, strict=True)
+                            self._merge_live_source_meta(
+                                used_sources=used_sources,
+                                source_disagreements=source_disagreements,
+                                category="proxy_indices",
+                                payload=component_payload,
+                                item_code=component_code,
+                            )
+                        elif component_target_type == "a_share_etf_proxy":
+                            component_payload = self.stock_fetcher.get_a_share_quote_live(component_quote_code, strict=True)
+                            self._merge_live_source_meta(
+                                used_sources=used_sources,
+                                source_disagreements=source_disagreements,
+                                category="proxy_tracking_targets",
+                                payload=component_payload,
+                                item_code=component_quote_code,
+                            )
+                        else:
+                            component_payload = self.index_fetcher.get_a_index_return_live(component_code, strict=True)
+                            self._merge_live_source_meta(
+                                used_sources=used_sources,
+                                source_disagreements=source_disagreements,
+                                category="proxy_indices",
+                                payload=component_payload,
+                                item_code=component_code,
+                            )
                         component_local_return_pct = float(component_payload["value"])
                         if component_payload.get("data_as_of_date") is not None:
                             index_data_dates.append(str(component_payload["data_as_of_date"]))
                     else:
-                        component_local_return_pct = self._get_index_return_by_market(
-                            index_code=component_code,
-                            market=component_market,
-                            batch_context=batch_context,
-                            strict=strict,
-                        )
-                        if batch_context is not None:
-                            component_as_of_date = (
-                                batch_context.hk_index_as_of_dates.get(component_code)
-                                if component_market == "港股"
-                                else batch_context.a_index_as_of_dates.get(component_code)
+                        if component_market == "港股":
+                            component_local_return_pct = self._get_index_return_by_market(
+                                index_code=component_code,
+                                market=component_market,
+                                batch_context=batch_context,
+                                strict=strict,
                             )
-                            if component_as_of_date is not None:
-                                index_data_dates.append(str(component_as_of_date))
+                            if batch_context is not None:
+                                component_as_of_date = batch_context.hk_index_as_of_dates.get(component_code)
+                                if component_as_of_date is not None:
+                                    index_data_dates.append(str(component_as_of_date))
+                        elif component_target_type == "a_share_etf_proxy":
+                            if batch_context is not None and component_quote_code in batch_context.all_prices:
+                                component_local_return_pct = float(batch_context.all_prices[component_quote_code]["change_pct"])
+                                component_as_of_date = batch_context.a_price_as_of_dates.get(component_quote_code)
+                                if component_as_of_date is not None:
+                                    index_data_dates.append(str(component_as_of_date))
+                            else:
+                                component_payload = self.stock_fetcher.get_a_share_quote_live(component_quote_code, strict=False)
+                                component_local_return_pct = float(component_payload["value"])
+                                if component_payload.get("data_as_of_date") is not None:
+                                    index_data_dates.append(str(component_payload["data_as_of_date"]))
+                        else:
+                            component_local_return_pct = self._get_index_return_by_market(
+                                index_code=component_code,
+                                market=component_market,
+                                batch_context=batch_context,
+                                strict=strict,
+                            )
+                            if batch_context is not None:
+                                component_as_of_date = batch_context.a_index_as_of_dates.get(component_code)
+                                if component_as_of_date is not None:
+                                    index_data_dates.append(str(component_as_of_date))
                     component_local_return = component_local_return_pct / 100
                     if component_market == "港股":
                         component_rmb_return = (1 + component_local_return) * (1 + r_fx) - 1
@@ -469,8 +512,10 @@ class ActiveEquityEstimator(BaseEstimator):
                     proxy_components_details.append(
                         {
                             "code": component_code,
+                            "quote_code": component_quote_code,
                             "name": component_name,
                             "market": component_market,
+                            "target_type": component_target_type,
                             "weight": component_ratio,
                             "proxy_weight": component_weight,
                             "local_return_pct": component_local_return_pct,

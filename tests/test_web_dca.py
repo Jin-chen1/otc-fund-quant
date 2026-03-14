@@ -359,6 +359,144 @@ class DcaWebTestCase(unittest.TestCase):
         self.assertEqual(payload["results"][2]["message"], "严格模式暂不可用")
         self.assertEqual(payload["results"][4]["message"], "严格模式暂不可用")
 
+    def test_portfolio_response_includes_sync_meta_and_skips_inline_sync(self):
+        self._seed_nav_rows([
+            ("2026-03-11", "000001", 1.5000, 1.5000),
+        ])
+        self._insert_dca_record(
+            "000001",
+            "2026-03-10",
+            150.0,
+            status=self.web_app.DCA_STATUS_CONFIRMED,
+            confirm_nav_date="2026-03-11",
+            confirm_nav=1.5,
+            shares=100.0,
+        )
+
+        with patch.object(self.web_app, "_sync_dca_records", side_effect=AssertionError("should not sync inline")), \
+             patch.object(self.web_app, "_schedule_dca_snapshot_sync_if_needed", return_value=False), \
+             patch.object(self.web_app.dca_fund_fetcher, "get_fund_info", return_value={"name": "测试基金A"}):
+            response = self.client.get("/api/dca/portfolio")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["funds"][0]["fund_name"], "测试基金A")
+        self.assertIn("sync", payload)
+        self.assertFalse(payload["sync"]["is_syncing"])
+        self.assertTrue(payload["sync"]["is_stale"])
+        self.assertIsNone(payload["sync"]["last_sync_completed_at"])
+        self.assertIsNone(payload["sync"]["last_sync_error"])
+
+    def test_portfolio_returns_cached_snapshot_when_fresh(self):
+        cached_payload = {
+            "as_of_date": "2026-03-12",
+            "portfolio": {
+                "tracked_fund_count": 1,
+                "total_confirmed_amount": 100.0,
+                "total_pending_amount": 0.0,
+                "total_value": 101.0,
+                "total_profit_amount": 1.0,
+                "total_profit_pct": 1.0,
+            },
+            "funds": [
+                {
+                    "fund_code": "000001",
+                    "fund_name": "缓存基金",
+                    "start_date": "2026-03-10",
+                    "latest_nav": 1.01,
+                    "latest_nav_date": "2026-03-12",
+                    "confirmed_amount": 100.0,
+                    "pending_amount": 0.0,
+                    "total_shares": 100.0,
+                    "current_value": 101.0,
+                    "profit_amount": 1.0,
+                    "profit_pct": 1.0,
+                    "record_count": 1,
+                    "pending_count": 0,
+                }
+            ],
+            "records": [],
+        }
+        with self.web_app._dca_snapshot_lock:
+            self.web_app._dca_snapshot_state["payload"] = cached_payload
+            self.web_app._dca_snapshot_state["generated_at"] = self.web_app.datetime.now()
+            self.web_app._dca_snapshot_state["last_sync_started_at"] = None
+            self.web_app._dca_snapshot_state["last_sync_completed_at"] = self.web_app.datetime.now()
+            self.web_app._dca_snapshot_state["last_sync_error"] = None
+            self.web_app._dca_snapshot_state["is_syncing"] = False
+            self.web_app._dca_snapshot_state["dirty"] = False
+
+        with patch.object(self.web_app, "_build_dca_snapshot_from_db", side_effect=AssertionError("should not rebuild")):
+            response = self.client.get("/api/dca/portfolio")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["funds"][0]["fund_name"], "缓存基金")
+        self.assertFalse(payload["sync"]["is_stale"])
+        self.assertFalse(payload["sync"]["is_syncing"])
+
+    def test_schedule_dca_snapshot_sync_if_needed_starts_thread_when_dirty(self):
+        original_testing = self.web_app.app.config["TESTING"]
+        self.web_app.app.config["TESTING"] = False
+        try:
+            with self.web_app._dca_snapshot_lock:
+                self.web_app._dca_snapshot_state["payload"] = {"as_of_date": "2026-03-12", "portfolio": {}, "funds": [], "records": []}
+                self.web_app._dca_snapshot_state["generated_at"] = self.web_app.datetime.now()
+                self.web_app._dca_snapshot_state["last_sync_started_at"] = None
+                self.web_app._dca_snapshot_state["last_sync_completed_at"] = None
+                self.web_app._dca_snapshot_state["last_sync_error"] = None
+                self.web_app._dca_snapshot_state["is_syncing"] = False
+                self.web_app._dca_snapshot_state["dirty"] = True
+
+            with patch.object(self.web_app, "_start_dca_snapshot_sync_thread") as mock_start:
+                scheduled = self.web_app._schedule_dca_snapshot_sync_if_needed()
+
+            self.assertTrue(scheduled)
+            mock_start.assert_called_once_with()
+            with self.web_app._dca_snapshot_lock:
+                self.assertTrue(self.web_app._dca_snapshot_state["is_syncing"])
+                self.assertIsNotNone(self.web_app._dca_snapshot_state["last_sync_started_at"])
+                self.assertIsNone(self.web_app._dca_snapshot_state["last_sync_error"])
+        finally:
+            self.web_app.app.config["TESTING"] = original_testing
+
+    def test_create_record_invalidates_dca_snapshot_cache(self):
+        with self.web_app._dca_snapshot_lock:
+            self.web_app._dca_snapshot_state["payload"] = {"as_of_date": "2026-03-12", "portfolio": {}, "funds": [], "records": []}
+            self.web_app._dca_snapshot_state["generated_at"] = self.web_app.datetime.now()
+            self.web_app._dca_snapshot_state["dirty"] = False
+
+        response = self.client.post(
+            "/api/dca/records",
+            json={"fund_code": "000001", "trade_date": "2026-03-12", "amount": 100.0},
+        )
+
+        self.assertEqual(response.status_code, 201)
+        with self.web_app._dca_snapshot_lock:
+            self.assertIsNone(self.web_app._dca_snapshot_state["payload"])
+            self.assertIsNone(self.web_app._dca_snapshot_state["generated_at"])
+            self.assertTrue(self.web_app._dca_snapshot_state["dirty"])
+
+    def test_delete_record_invalidates_dca_snapshot_cache(self):
+        self._insert_dca_record(
+            "000001",
+            "2026-03-12",
+            100.0,
+            status=self.web_app.DCA_STATUS_PENDING,
+        )
+        with self.web_app._dca_snapshot_lock:
+            self.web_app._dca_snapshot_state["payload"] = {"as_of_date": "2026-03-12", "portfolio": {}, "funds": [], "records": []}
+            self.web_app._dca_snapshot_state["generated_at"] = self.web_app.datetime.now()
+            self.web_app._dca_snapshot_state["dirty"] = False
+
+        response = self.client.delete("/api/dca/records/1")
+
+        self.assertEqual(response.status_code, 200)
+        with self.web_app._dca_snapshot_lock:
+            self.assertIsNone(self.web_app._dca_snapshot_state["payload"])
+            self.assertIsNone(self.web_app._dca_snapshot_state["generated_at"])
+            self.assertTrue(self.web_app._dca_snapshot_state["dirty"])
+
 
 if __name__ == "__main__":
     unittest.main()

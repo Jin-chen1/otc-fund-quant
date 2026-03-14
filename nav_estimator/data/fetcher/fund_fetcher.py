@@ -14,6 +14,7 @@ from loguru import logger
 
 from ...config.settings import (
     A_INDEX_ALIAS_CALIBRATIONS,
+    A_SHARE_PROXY_TARGET_CALIBRATIONS,
     INDEX_ALIAS_CATALOG,
     NON_EQUITY_BENCHMARK_KEYWORDS,
     PROXY_INDEX_MAP,
@@ -616,6 +617,66 @@ class FundFetcher(BaseFetcher):
         }
 
     @classmethod
+    def _iter_a_share_proxy_alias_entries(cls) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        for item in A_SHARE_PROXY_TARGET_CALIBRATIONS:
+            security_code = str(item.get("security_code", "")).strip()
+            canonical_name = str(item.get("canonical_name", "")).strip()
+            target_type = str(item.get("target_type", "")).strip()
+            if security_code == "" or canonical_name == "" or target_type == "":
+                continue
+            entries.append(
+                {
+                    "canonical_name": canonical_name,
+                    "code": security_code,
+                    "quote_code": security_code,
+                    "target_type": target_type,
+                    "market": str(item.get("market", "A股")).strip() or "A股",
+                    "tracking_name": str(item.get("tracking_name", canonical_name)).strip() or canonical_name,
+                    "aliases": [str(alias) for alias in item.get("aliases", [])],
+                }
+            )
+        return entries
+
+    @classmethod
+    def _resolve_a_share_proxy_target_from_name(cls, index_name: str) -> dict[str, Any] | None:
+        target_name = str(index_name).strip()
+        if target_name == "":
+            return None
+        normalized_candidates = {
+            cls._normalize_tracking_name_key(target_name),
+            cls._normalize_index_name(target_name),
+        }
+        normalized_candidates.discard("")
+        if not normalized_candidates:
+            return None
+        for entry in cls._iter_a_share_proxy_alias_entries():
+            entry_names = [str(entry.get("canonical_name", ""))] + [str(alias) for alias in entry.get("aliases", [])]
+            entry_normalized_names = {
+                cls._normalize_tracking_name_key(name)
+                for name in entry_names
+                if str(name).strip() != ""
+            }
+            entry_normalized_names.update(
+                cls._normalize_index_name(name)
+                for name in entry_names
+                if str(name).strip() != ""
+            )
+            entry_normalized_names.discard("")
+            if normalized_candidates & entry_normalized_names:
+                quote_code = str(entry.get("quote_code") or entry.get("code", "")).strip()
+                if quote_code == "":
+                    return None
+                return {
+                    "code": quote_code,
+                    "name": str(entry.get("tracking_name") or entry.get("canonical_name", "")).strip(),
+                    "market": str(entry.get("market", "A股")).strip() or "A股",
+                    "target_type": "a_share_etf_proxy",
+                    "quote_code": quote_code,
+                }
+        return None
+
+    @classmethod
     def _run_catalog_prewarm(cls, force_refresh: bool):
         try:
             cls.get_shared_a_index_catalog_snapshot(force_refresh=force_refresh)
@@ -1016,14 +1077,38 @@ class FundFetcher(BaseFetcher):
                 self._set_cached_a_index_lookup_failure(target_name, str(error))
             raise
 
-    def _resolve_index_code_from_alias_entry(self, entry: dict[str, Any]) -> tuple[str, str]:
+    def _resolve_index_code_from_alias_entry(self, entry: dict[str, Any]) -> dict[str, Any]:
+        if str(entry.get("target_type", "")).strip() == "a_share_etf_proxy":
+            quote_code = str(entry.get("quote_code") or entry.get("code", "")).strip()
+            if quote_code == "":
+                raise ValueError(f"指数别名 {entry.get('canonical_name')} 缺少ETF代理代码")
+            return {
+                "code": quote_code,
+                "name": str(entry.get("tracking_name") or entry.get("canonical_name", "")).strip(),
+                "market": str(entry.get("market", "A股")).strip() or "A股",
+                "target_type": "a_share_etf_proxy",
+                "quote_code": quote_code,
+            }
         code = entry.get("code")
         if code:
-            return str(code), str(entry["canonical_name"])
+            return {
+                "code": str(code),
+                "name": str(entry["canonical_name"]),
+                "market": str(entry.get("market", "")).strip(),
+                "target_type": "a_index" if str(entry.get("market", "")).strip() == "A股" else "index",
+            }
         if entry.get("market") != "A股":
             raise ValueError(f"指数别名 {entry.get('canonical_name')} 缺少代码")
+        proxy_target = self._resolve_a_share_proxy_target_from_name(str(entry.get("canonical_name", "")))
+        if proxy_target is not None:
+            return proxy_target
         resolved = self._lookup_a_index_code_by_name(str(entry["canonical_name"]))
-        return str(resolved["code"]), str(resolved["name"])
+        return {
+            "code": str(resolved["code"]),
+            "name": str(resolved["name"]),
+            "market": "A股",
+            "target_type": "a_index",
+        }
 
     def extract_benchmark_equity_index_components(
         self,
@@ -1054,6 +1139,10 @@ class FundFetcher(BaseFetcher):
                 continue
             for alias in entry.get("aliases", []):
                 alias_entries.append((len(str(alias)), entry, str(alias)))
+        if allowed_markets is None or "A股" in allowed_markets:
+            for entry in self._iter_a_share_proxy_alias_entries():
+                for alias in entry.get("aliases", []):
+                    alias_entries.append((len(str(alias)), entry, str(alias)))
 
         alias_entries.sort(key=lambda item: item[0], reverse=True)
 
@@ -1070,7 +1159,7 @@ class FundFetcher(BaseFetcher):
                             continue
                         attempted_a_lookup_names.add(attempted_name)
                 try:
-                    code, resolved_name = self._resolve_index_code_from_alias_entry(entry)
+                    resolved_meta = self._resolve_index_code_from_alias_entry(entry)
                 except Exception as e:
                     self._append_unresolved_equity_candidate(
                         unresolved_components,
@@ -1084,6 +1173,8 @@ class FundFetcher(BaseFetcher):
                     )
                     logger.debug(f"指数别名解析失败: alias={alias}, reason={e}")
                     continue
+                code = str(resolved_meta["code"])
+                resolved_name = str(resolved_meta["name"])
                 if code in seen_codes:
                     continue
                 normalized_name = self._normalize_index_name(resolved_name)
@@ -1093,11 +1184,13 @@ class FundFetcher(BaseFetcher):
                     {
                         "code": code,
                         "name": resolved_name,
-                        "market": entry["market"],
+                        "market": str(resolved_meta.get("market", entry["market"])),
                         "raw_weight_pct": self._extract_weight_nearby(normalized_source_text, start, end),
                         "position": start,
                         "match_end": end,
                         "is_fallback": False,
+                        "target_type": str(resolved_meta.get("target_type", "a_index")),
+                        "quote_code": str(resolved_meta.get("quote_code", code)),
                     }
                 )
                 occupied_spans.append((start, end))
@@ -1222,6 +1315,8 @@ class FundFetcher(BaseFetcher):
                         "name": component["name"],
                         "market": component["market"],
                         "weight": weight / weight_sum,
+                        "target_type": component.get("target_type", "a_index"),
+                        "quote_code": component.get("quote_code", component["code"]),
                     }
                 )
             return components
@@ -1234,6 +1329,8 @@ class FundFetcher(BaseFetcher):
                     "name": component["name"],
                     "market": component["market"],
                     "weight": equal_weight,
+                    "target_type": component.get("target_type", "a_index"),
+                    "quote_code": component.get("quote_code", component["code"]),
                 }
             )
         return components
@@ -1394,8 +1491,9 @@ class FundFetcher(BaseFetcher):
         if unresolved_weighted_components:
             unresolved_text = self._format_unresolved_weighted_components(unresolved_weighted_components)
             raise ValueError(f"基金 {fund_info.get('code', '')} 的业绩比较基准存在未解析指数成分: {unresolved_text}")
-        if raw_components:
-            return str(raw_components[0]["code"])
+        a_index_components = [item for item in raw_components if item.get("target_type", "a_index") == "a_index"]
+        if a_index_components:
+            return str(a_index_components[0]["code"])
         code_match = re.search(r"(?<!\d)(\d{6})(?!\d)", benchmark_text)
         if code_match:
             return code_match.group(1)

@@ -85,7 +85,9 @@ INDEX_ALIAS_CATALOG = [
     {"canonical_name": "中证白酒", "code": "399997", "market": "A股", "aliases": ["中证白酒", "中证白酒指数"]},
     {"canonical_name": "中证医药卫生", "code": None, "market": "A股", "aliases": ["中证医药卫生", "中证医药卫生指数"]},
     {"canonical_name": "中证机器人", "code": None, "market": "A股", "aliases": ["中证机器人", "中证机器人指数"]},
+    {"canonical_name": "中证人工智能主题", "code": None, "market": "A股", "aliases": ["中证人工智能主题", "中证人工智能主题指数"]},
     {"canonical_name": "中证港股通综合", "code": None, "market": "A股", "aliases": ["中证港股通综合", "中证港股通综合指数"]},
+    {"canonical_name": "中证全指半导体产品与设备", "code": None, "market": "A股", "aliases": ["中证全指半导体产品与设备", "中证全指半导体产品与设备指数"]},
     {"canonical_name": "恒生A股电网设备", "code": None, "market": "A股", "aliases": ["恒生A股电网设备", "恒生A股电网设备指数"]},
     {"canonical_name": "恒生科技", "code": "HSTECH", "market": "港股", "aliases": ["恒生科技指数", "恒生科技", "hstech"]},
     {"canonical_name": "恒生指数", "code": "HSI", "market": "港股", "aliases": ["恒生指数", "恒生综合", "hsi", "hang seng"]},
@@ -113,7 +115,74 @@ A_INDEX_ALIAS_CALIBRATIONS = [
     },
 ]
 
+A_SHARE_PROXY_TARGET_CALIBRATIONS = [
+    {
+        "canonical_name": "中证人工智能主题",
+        "target_type": "a_share_etf_proxy",
+        "security_code": "159819",
+        "tracking_name": "人工智能ETF",
+        "market": "A股",
+        "aliases": ["中证人工智能主题", "中证人工智能主题指数"],
+    },
+    {
+        "canonical_name": "中证红利低波动",
+        "target_type": "a_share_etf_proxy",
+        "security_code": "512890",
+        "tracking_name": "红利低波ETF",
+        "market": "A股",
+        "aliases": ["中证红利低波动", "中证红利低波动指数"],
+    },
+    {
+        "canonical_name": "中证港股通创新药",
+        "target_type": "a_share_etf_proxy",
+        "security_code": "513780",
+        "tracking_name": "港股创新药ETF",
+        "market": "A股",
+        "aliases": ["中证港股通创新药", "中证港股通创新药指数"],
+    },
+    {
+        "canonical_name": "创业板人工智能",
+        "target_type": "a_share_etf_proxy",
+        "security_code": "159246",
+        "tracking_name": "创业板人工智能ETF富国",
+        "market": "A股",
+        "aliases": ["创业板人工智能", "创业板人工智能指数"],
+    },
+    {
+        "canonical_name": "中证全指半导体产品与设备",
+        "target_type": "a_share_etf_proxy",
+        "security_code": "512480",
+        "tracking_name": "半导体ETF",
+        "market": "A股",
+        "aliases": ["中证全指半导体产品与设备", "中证全指半导体产品与设备指数"],
+    },
+]
+
 TRACKING_TARGET_CALIBRATIONS = {
+    "012733": {
+        "target_type": "linked_etf_a_share",
+        "security_code": "159819",
+        "tracking_name": "人工智能ETF",
+        "market": "A股",
+    },
+    "012734": {
+        "target_type": "linked_etf_a_share",
+        "security_code": "159819",
+        "tracking_name": "人工智能ETF",
+        "market": "A股",
+    },
+    "007467": {
+        "target_type": "linked_etf_a_share",
+        "security_code": "512890",
+        "tracking_name": "红利低波ETF",
+        "market": "A股",
+    },
+    "020640": {
+        "target_type": "linked_etf_a_share",
+        "security_code": "560780",
+        "tracking_name": "广发中证半导体材料设备主题ETF",
+        "market": "A股",
+    },
     "018345": {
         "target_type": "linked_etf_a_share",
         "security_code": "562500",
@@ -124,6 +193,18 @@ TRACKING_TARGET_CALIBRATIONS = {
         "target_type": "linked_etf_a_share",
         "security_code": "560880",
         "tracking_name": "恒生A股电网设备ETF",
+        "market": "A股",
+    },
+    "023598": {
+        "target_type": "linked_etf_a_share",
+        "security_code": "513780",
+        "tracking_name": "港股创新药ETF",
+        "market": "A股",
+    },
+    "024663": {
+        "target_type": "linked_etf_a_share",
+        "security_code": "159246",
+        "tracking_name": "创业板人工智能ETF富国",
         "market": "A股",
     },
 }
@@ -196,6 +277,7 @@ class Settings:
         self.proxy_index_map = PROXY_INDEX_MAP
         self.index_alias_catalog = INDEX_ALIAS_CATALOG
         self.a_index_alias_calibrations = A_INDEX_ALIAS_CALIBRATIONS
+        self.a_share_proxy_target_calibrations = A_SHARE_PROXY_TARGET_CALIBRATIONS
         self.tracking_target_calibrations = TRACKING_TARGET_CALIBRATIONS
         self.non_equity_benchmark_keywords = NON_EQUITY_BENCHMARK_KEYWORDS
         self.qdii_proxy_baskets = QDII_PROXY_BASKETS

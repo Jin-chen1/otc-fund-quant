@@ -759,6 +759,11 @@ let lastSnapshot = { records: [] };
 let isSubmitting = false;
 let estimateMap = {};
 let estimateRequestSeq = 0;
+let portfolioRequestSeq = 0;
+let portfolioPollTimer = null;
+const DCA_SNAPSHOT_STORAGE_KEY = 'dca-dashboard-snapshot-v1';
+const DCA_SYNC_POLL_INTERVAL_MS = 2000;
+const DCA_SYNC_POLL_MAX_ATTEMPTS = 10;
 
 function localTodayString() {
     const now = new Date();
@@ -854,10 +859,91 @@ function uniqueFundCodes(funds) {
     return codes;
 }
 
+function sameFundCodes(leftFunds, rightFunds) {
+    const leftCodes = uniqueFundCodes(leftFunds).slice().sort();
+    const rightCodes = uniqueFundCodes(rightFunds).slice().sort();
+    if (leftCodes.length !== rightCodes.length) {
+        return false;
+    }
+    return leftCodes.every((code, index) => code === rightCodes[index]);
+}
+
 function setEstimateFailureState(fundCodes, message) {
     estimateMap = Object.fromEntries(
         fundCodes.map(code => [code, { status: 'failed', message }])
     );
+}
+
+function canUseSessionStorage() {
+    try {
+        return typeof window !== 'undefined' && typeof window.sessionStorage !== 'undefined';
+    } catch (e) {
+        return false;
+    }
+}
+
+function snapshotForCache(data) {
+    return {
+        as_of_date: data?.as_of_date || null,
+        portfolio: data?.portfolio || {},
+        funds: data?.funds || [],
+        records: data?.records || [],
+    };
+}
+
+function persistSnapshotToSession(data) {
+    if (!canUseSessionStorage()) {
+        return;
+    }
+    try {
+        window.sessionStorage.setItem(DCA_SNAPSHOT_STORAGE_KEY, JSON.stringify(snapshotForCache(data)));
+    } catch (e) {
+        // ignore storage quota and privacy mode failures
+    }
+}
+
+function restoreSnapshotFromSession() {
+    if (!canUseSessionStorage()) {
+        return null;
+    }
+    try {
+        const raw = window.sessionStorage.getItem(DCA_SNAPSHOT_STORAGE_KEY);
+        if (!raw) {
+            return null;
+        }
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') {
+            return null;
+        }
+        return snapshotForCache(parsed);
+    } catch (e) {
+        return null;
+    }
+}
+
+function stopPortfolioPolling() {
+    if (portfolioPollTimer !== null) {
+        window.clearTimeout(portfolioPollTimer);
+        portfolioPollTimer = null;
+    }
+}
+
+function schedulePortfolioPolling(nextAttempt) {
+    stopPortfolioPolling();
+    if (nextAttempt > DCA_SYNC_POLL_MAX_ATTEMPTS) {
+        return;
+    }
+    portfolioPollTimer = window.setTimeout(() => {
+        loadPortfolio({ pollAttempt: nextAttempt });
+    }, DCA_SYNC_POLL_INTERVAL_MS);
+}
+
+function shouldReloadEstimates(nextSnapshot) {
+    const nextFunds = nextSnapshot?.funds || [];
+    if (!sameFundCodes(lastSnapshot.funds || [], nextFunds)) {
+        return true;
+    }
+    return Object.keys(estimateMap).length === 0 && uniqueFundCodes(nextFunds).length > 0;
 }
 
 function renderEstimateBox(fundCode) {
@@ -1139,18 +1225,43 @@ async function loadEstimates(funds) {
     }
 }
 
-async function loadPortfolio() {
+async function loadPortfolio(options = {}) {
+    const pollAttempt = Number(options?.pollAttempt || 0);
+    if (pollAttempt === 0) {
+        stopPortfolioPolling();
+    }
+    const requestSeq = ++portfolioRequestSeq;
+
     try {
         const resp = await fetch('/api/dca/portfolio');
         const data = await resp.json();
+        if (requestSeq !== portfolioRequestSeq) {
+            return;
+        }
         if (!resp.ok) {
             setMessage(data.error || '读取定投看板失败');
             return;
         }
-        estimateMap = {};
-        renderAll(data);
-        loadEstimates(data.funds || []);
+        const nextSnapshot = snapshotForCache(data);
+        const reloadEstimates = shouldReloadEstimates(nextSnapshot);
+        renderAll(nextSnapshot);
+        persistSnapshotToSession(nextSnapshot);
+        if (reloadEstimates) {
+            estimateMap = {};
+            loadEstimates(nextSnapshot.funds || []);
+        }
+
+        const sync = data.sync || {};
+        if (sync.is_syncing || sync.is_stale) {
+            schedulePortfolioPolling(pollAttempt + 1);
+        } else {
+            stopPortfolioPolling();
+        }
     } catch (e) {
+        if (requestSeq !== portfolioRequestSeq) {
+            return;
+        }
+        stopPortfolioPolling();
         setMessage('网络错误: ' + e.message);
     }
 }
@@ -1260,6 +1371,10 @@ document.getElementById('dca-amount').addEventListener('keypress', (event) => {
 });
 
 initTradeDateInput();
+const cachedSnapshot = restoreSnapshotFromSession();
+if (cachedSnapshot) {
+    renderAll(cachedSnapshot);
+}
 loadPortfolio();
 </script>
 
