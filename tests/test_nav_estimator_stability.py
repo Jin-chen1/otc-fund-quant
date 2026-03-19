@@ -56,7 +56,7 @@ def _resolved_strategy_context(
     profile_label: str = "A股主动权益",
     requested_strategy: str = "v6",
     effective_strategy: str = "v6",
-    default_strategy: str = "regime_adaptive",
+    default_strategy: str = "active_equity_cn",
     strategy_params: dict | None = None,
     strategy_adjusted: bool = False,
     adjustment_reason: str | None = None,
@@ -65,6 +65,8 @@ def _resolved_strategy_context(
     catalog_map = {
         "v6": {"id": "v6", "label": "估值趋势", "description": "desc-v6"},
         "regime_adaptive": {"id": "regime_adaptive", "label": "状态自适应", "description": "desc-regime"},
+        "active_equity_cn": {"id": "active_equity_cn", "label": "A股主动权益", "description": "desc-active-cn"},
+        "active_equity_hk": {"id": "active_equity_hk", "label": "港股主动权益", "description": "desc-active-hk"},
         "index_momentum": {"id": "index_momentum", "label": "指数动量", "description": "desc-index"},
         "bond_stability": {"id": "bond_stability", "label": "纯债稳健", "description": "desc-bond"},
         "qdii_trend": {"id": "qdii_trend", "label": "QDII 趋势", "description": "desc-qdii"},
@@ -79,7 +81,7 @@ def _resolved_strategy_context(
         requested_strategy=requested_strategy,
         effective_strategy=effective_strategy,
         default_strategy=default_strategy,
-        available_strategies=[catalog_map[item] for item in (available_ids or ["v6", "regime_adaptive"])],
+        available_strategies=[catalog_map[item] for item in (available_ids or ["v6", "regime_adaptive", "active_equity_cn"])],
         strategy_params=strategy_params or {"max_position_ratio": 1.0},
         strategy_adjusted=strategy_adjusted,
         adjustment_reason=adjustment_reason,
@@ -2323,6 +2325,19 @@ def test_nav_estimator_page_default_strict_checked():
     assert "checked" in html[strict_index:strict_index + 80]
 
 
+def test_nav_estimator_page_detail_layout_smoke():
+    client = _client()
+    response = client.get("/nav-estimator")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+
+    assert 'id="detail-overview"' in html
+    assert 'id="detail-proxy-table"' in html
+    assert 'id="detail-holdings-table"' in html
+    assert 'id="detail-raw-json"' in html
+    assert 'id="detail-breakdown"' not in html
+
+
 def test_failure_response_preserves_quality_gate_details():
     frame = pd.DataFrame(
         [
@@ -2509,12 +2524,12 @@ def test_analyze_api_returns_strategy_context():
         },
     }
     context = _resolved_strategy_context(
-        effective_strategy="regime_adaptive",
-        default_strategy="regime_adaptive",
+        effective_strategy="active_equity_cn",
+        default_strategy="active_equity_cn",
         strategy_adjusted=True,
         adjustment_reason="当前画像不支持 index_momentum，已切换为默认策略",
         requested_strategy="index_momentum",
-        available_ids=["v6", "regime_adaptive"],
+        available_ids=["v6", "regime_adaptive", "active_equity_cn"],
     )
 
     with patch.object(web_app, "resolve_strategy_context", return_value=context), \
@@ -2533,9 +2548,9 @@ def test_analyze_api_returns_strategy_context():
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["fund_name"] == "测试基金"
-    assert payload["strategy"] == "regime_adaptive"
+    assert payload["strategy"] == "active_equity_cn"
     assert payload["strategy_context"]["requested_strategy"] == "index_momentum"
-    assert payload["strategy_context"]["effective_strategy"] == "regime_adaptive"
+    assert payload["strategy_context"]["effective_strategy"] == "active_equity_cn"
     assert payload["strategy_context"]["strategy_adjusted"] is True
     assert payload["strategy_context"]["adjustment_reason"] == "当前画像不支持 index_momentum，已切换为默认策略"
 
@@ -2574,12 +2589,13 @@ def test_analyze_api_uses_effective_strategy_for_persistence():
     }
     context = _resolved_strategy_context(
         requested_strategy="index_momentum",
-        effective_strategy="regime_adaptive",
-        default_strategy="regime_adaptive",
+        effective_strategy="active_equity_cn",
+        default_strategy="active_equity_cn",
         strategy_adjusted=True,
         adjustment_reason="当前画像不支持 index_momentum，已切换为默认策略",
-        available_ids=["v6", "regime_adaptive"],
+        available_ids=["v6", "regime_adaptive", "active_equity_cn"],
     )
+    params_hash = web_app._stable_backtest_params_hash(context.strategy_params)
     mock_latest_signal_date = MagicMock(return_value="")
     mock_generate_signal_points = MagicMock(return_value={"records": []})
     mock_auto_save_reviews = MagicMock()
@@ -2602,15 +2618,15 @@ def test_analyze_api_uses_effective_strategy_for_persistence():
 
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload["strategy"] == "regime_adaptive"
-    mock_latest_signal_date.assert_called_once_with("007343", "regime_adaptive")
-    assert mock_generate_signal_points.call_args.kwargs["strategy"] == "regime_adaptive"
+    assert payload["strategy"] == "active_equity_cn"
+    mock_latest_signal_date.assert_called_once_with("007343", "active_equity_cn")
+    assert mock_generate_signal_points.call_args.kwargs["strategy"] == "active_equity_cn"
     assert mock_generate_signal_points.call_args.kwargs["params"] == context.strategy_params
-    assert mock_auto_save_reviews.call_args.kwargs["strategy"] == "regime_adaptive"
-    mock_get_all_signal_points.assert_called_once_with("007343", "regime_adaptive")
-    mock_get_recommendations.assert_called_once_with("007343", "regime_adaptive")
+    assert mock_auto_save_reviews.call_args.kwargs["strategy"] == "active_equity_cn"
+    mock_get_all_signal_points.assert_called_once_with("007343", "active_equity_cn")
+    mock_get_recommendations.assert_called_once_with("007343", "active_equity_cn")
     mock_get_backtest_cache.assert_called_once()
-    assert mock_get_backtest_cache.call_args.args[:2] == ("007343", "regime_adaptive")
+    assert mock_get_backtest_cache.call_args.args == ("007343", "active_equity_cn", params_hash, "2025-01-20")
 
 
 def test_analyze_api_marks_period_returns_ready_on_cache_hit():
@@ -2646,6 +2662,7 @@ def test_analyze_api_marks_period_returns_ready_on_cache_hit():
         },
     }
     context = _resolved_strategy_context()
+    params_hash = web_app._stable_backtest_params_hash(context.strategy_params)
     cached_period_returns = [{"label": "近1年", "days": 365, "strategy_pct": 12.3, "fund_pct": 8.6}]
 
     with patch.object(web_app, "resolve_strategy_context", return_value=context), \
@@ -2667,6 +2684,84 @@ def test_analyze_api_marks_period_returns_ready_on_cache_hit():
     assert payload["period_returns"] == cached_period_returns
     assert payload["period_returns_error"] is None
     assert payload["period_returns_end_date"] == "2025-01-20"
+    assert payload["period_returns_params_hash"] == params_hash
+
+
+def test_analyze_api_returns_backtest_trade_payload():
+    client = _client()
+    history_df = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=20).date,
+            "nav": [1 + idx * 0.01 for idx in range(20)],
+        }
+    )
+    recommendation = {
+        "action": "HOLD",
+        "reason": "trade payload",
+        "buy_score": 1,
+        "sell_signal": False,
+        "indicators": {
+            "current_nav": 1.2,
+            "percentile": 0.5,
+            "is_cheap_zone": False,
+            "gold_cross": False,
+            "death_cross": False,
+            "rsi": 50,
+            "macd_turn_positive": False,
+            "macd_5d_negative": False,
+            "above_ma20": True,
+            "above_ma20_3d": True,
+            "ma20": 1.1,
+            "ma60": 1.0,
+            "macd_hist": 0.01,
+            "atr": 0.02,
+            "adx": 18,
+            "market_regime": "RANGE",
+        },
+    }
+    context = _resolved_strategy_context()
+    params_hash = web_app._stable_backtest_params_hash(context.strategy_params)
+    trade_payload = {
+        "trade_points": {
+            "buy_dates": ["2025-01-10"],
+            "buy_navs": [1.1],
+            "sell_dates": ["2025-01-15"],
+            "sell_navs": [1.15],
+        },
+        "trade_history": [
+            {
+                "date": "2025-01-15",
+                "action": "SELL",
+                "nav": 1.15,
+                "amount": 115.0,
+                "shares": 100.0,
+                "decision_date": "2025-01-14",
+            }
+        ],
+    }
+
+    with patch.object(web_app, "resolve_strategy_context", return_value=context), \
+         patch.object(web_app.loader, "update_db"), \
+         patch.object(web_app, "_get_fund_history", return_value=history_df), \
+         patch.object(web_app, "get_strategy_definition", return_value=SimpleNamespace(generator=MagicMock(return_value=recommendation))), \
+         patch.object(web_app, "get_chart_data", return_value={"dates": [], "nav": [], "ma20": [], "ma60": []}), \
+         patch.object(web_app, "_get_latest_signal_date", return_value=""), \
+         patch.object(web_app, "generate_signal_points", return_value={"records": []}), \
+         patch.object(web_app, "_auto_save_reviews"), \
+         patch.object(web_app, "_get_all_signal_points", return_value={"buy_dates": [], "buy_navs": [], "sell_dates": [], "sell_navs": []}), \
+         patch.object(web_app, "_get_recommendations", return_value=[]), \
+         patch.object(web_app, "_ensure_period_returns", return_value={"status": "ready", "period_returns": [], "error": None}), \
+         patch.object(web_app, "get_backtest_trades", return_value=trade_payload) as mock_get_backtest_trades:
+        response = client.post("/api/analyze", json={"fund_code": "007343", "strategy": "v6"})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["trade_points"] == trade_payload["trade_points"]
+    assert payload["trade_history"] == trade_payload["trade_history"]
+    assert payload["period_returns_params_hash"] == params_hash
+    assert mock_get_backtest_trades.call_args.kwargs["strategy"] == "v6"
+    assert mock_get_backtest_trades.call_args.kwargs["params"] == context.strategy_params
+    assert mock_get_backtest_trades.call_args.kwargs["days"] == 365
 
 
 def test_analyze_api_returns_pending_when_period_returns_cache_misses():
@@ -2702,6 +2797,7 @@ def test_analyze_api_returns_pending_when_period_returns_cache_misses():
         },
     }
     context = _resolved_strategy_context()
+    params_hash = web_app._stable_backtest_params_hash(context.strategy_params)
     pending_future = Future()
     mock_executor = MagicMock()
     mock_executor.submit.return_value = pending_future
@@ -2726,9 +2822,10 @@ def test_analyze_api_returns_pending_when_period_returns_cache_misses():
     assert payload["period_returns_status"] == "pending"
     assert payload["period_returns"] is None
     assert payload["period_returns_error"] is None
+    assert payload["period_returns_params_hash"] == params_hash
     mock_executor.submit.assert_called_once()
     mock_calc_period_returns.assert_not_called()
-    task_key = web_app._backtest_task_key("007343", "v6", "2025-01-20")
+    task_key = web_app._backtest_task_key("007343", "v6", params_hash, "2025-01-20")
     task = web_app._backtest_tasks[task_key]
     assert task["status"] == web_app.BACKTEST_STATUS_PENDING
     assert task["created_at"] is not None
@@ -2771,6 +2868,7 @@ def test_analyze_api_dedupes_pending_period_returns_tasks():
         },
     }
     context = _resolved_strategy_context()
+    params_hash = web_app._stable_backtest_params_hash(context.strategy_params)
     pending_future = Future()
     mock_executor = MagicMock()
     mock_executor.submit.return_value = pending_future
@@ -2794,12 +2892,15 @@ def test_analyze_api_dedupes_pending_period_returns_tasks():
     assert response_two.status_code == 200
     assert response_one.get_json()["period_returns_status"] == "pending"
     assert response_two.get_json()["period_returns_status"] == "pending"
+    assert response_one.get_json()["period_returns_params_hash"] == params_hash
+    assert response_two.get_json()["period_returns_params_hash"] == params_hash
     mock_executor.submit.assert_called_once()
 
 
 def test_period_returns_api_transitions_from_pending_to_ready():
     client = _client()
-    task_key = web_app._backtest_task_key("007343", "v6", "2025-01-20")
+    params_hash = "abc123"
+    task_key = web_app._backtest_task_key("007343", "v6", params_hash, "2025-01-20")
     with web_app._backtest_tasks_lock:
         web_app._backtest_tasks[task_key] = {
             "status": web_app.BACKTEST_STATUS_PENDING,
@@ -2809,14 +2910,14 @@ def test_period_returns_api_transitions_from_pending_to_ready():
         }
 
     with patch.object(web_app, "_get_backtest_cache", return_value=None):
-        pending_response = client.get("/api/period-returns?fund_code=007343&strategy=v6&end_date=2025-01-20")
+        pending_response = client.get(f"/api/period-returns?fund_code=007343&strategy=v6&params_hash={params_hash}&end_date=2025-01-20")
 
     assert pending_response.status_code == 200
     assert pending_response.get_json()["status"] == "pending"
 
     ready_returns = [{"label": "近1年", "days": 365, "strategy_pct": 10.5, "fund_pct": 8.1}]
     with patch.object(web_app, "_get_backtest_cache", return_value=ready_returns):
-        ready_response = client.get("/api/period-returns?fund_code=007343&strategy=v6&end_date=2025-01-20")
+        ready_response = client.get(f"/api/period-returns?fund_code=007343&strategy=v6&params_hash={params_hash}&end_date=2025-01-20")
 
     assert ready_response.status_code == 200
     payload = ready_response.get_json()
@@ -2827,7 +2928,8 @@ def test_period_returns_api_transitions_from_pending_to_ready():
 
 def test_period_returns_api_returns_error_state():
     client = _client()
-    task_key = web_app._backtest_task_key("007343", "v6", "2025-01-20")
+    params_hash = "abc123"
+    task_key = web_app._backtest_task_key("007343", "v6", params_hash, "2025-01-20")
     with web_app._backtest_tasks_lock:
         web_app._backtest_tasks[task_key] = {
             "status": web_app.BACKTEST_STATUS_ERROR,
@@ -2837,7 +2939,7 @@ def test_period_returns_api_returns_error_state():
         }
 
     with patch.object(web_app, "_get_backtest_cache", return_value=None):
-        response = client.get("/api/period-returns?fund_code=007343&strategy=v6&end_date=2025-01-20")
+        response = client.get(f"/api/period-returns?fund_code=007343&strategy=v6&params_hash={params_hash}&end_date=2025-01-20")
 
     assert response.status_code == 200
     payload = response.get_json()
@@ -2848,7 +2950,8 @@ def test_period_returns_api_returns_error_state():
 
 def test_period_returns_api_marks_stale_pending_task_as_error():
     client = _client()
-    task_key = web_app._backtest_task_key("007343", "v6", "2025-01-20")
+    params_hash = "abc123"
+    task_key = web_app._backtest_task_key("007343", "v6", params_hash, "2025-01-20")
     stale_at = web_app._backtest_now() - web_app.BACKTEST_PENDING_TTL - timedelta(seconds=1)
     task = web_app._create_backtest_task(status=web_app.BACKTEST_STATUS_PENDING)
     task["created_at"] = stale_at
@@ -2858,7 +2961,7 @@ def test_period_returns_api_marks_stale_pending_task_as_error():
         web_app._backtest_tasks[task_key] = task
 
     with patch.object(web_app, "_get_backtest_cache", return_value=None):
-        response = client.get("/api/period-returns?fund_code=007343&strategy=v6&end_date=2025-01-20")
+        response = client.get(f"/api/period-returns?fund_code=007343&strategy=v6&params_hash={params_hash}&end_date=2025-01-20")
 
     assert response.status_code == 200
     payload = response.get_json()
@@ -2901,7 +3004,8 @@ def test_analyze_api_requeues_after_pending_task_becomes_stale():
         },
     }
     context = _resolved_strategy_context()
-    task_key = web_app._backtest_task_key("007343", "v6", "2025-01-20")
+    params_hash = web_app._stable_backtest_params_hash(context.strategy_params)
+    task_key = web_app._backtest_task_key("007343", "v6", params_hash, "2025-01-20")
     stale_at = web_app._backtest_now() - web_app.BACKTEST_PENDING_TTL - timedelta(seconds=1)
     stale_task = web_app._create_backtest_task(status=web_app.BACKTEST_STATUS_PENDING)
     stale_task["created_at"] = stale_at
@@ -2930,12 +3034,14 @@ def test_analyze_api_requeues_after_pending_task_becomes_stale():
 
     assert response.status_code == 200
     assert response.get_json()["period_returns_status"] == "pending"
+    assert response.get_json()["period_returns_params_hash"] == params_hash
     mock_executor.submit.assert_called_once()
     assert web_app._backtest_tasks[task_key]["status"] == web_app.BACKTEST_STATUS_PENDING
 
 
 def test_period_returns_payload_prunes_finished_task_after_retention():
-    task_key = web_app._backtest_task_key("007343", "v6", "2025-01-20")
+    params_hash = "abc123"
+    task_key = web_app._backtest_task_key("007343", "v6", params_hash, "2025-01-20")
     old_completed_at = web_app._backtest_now() - web_app.BACKTEST_FINISHED_TTL - timedelta(seconds=1)
     task = web_app._create_backtest_task(status=web_app.BACKTEST_STATUS_ERROR, error="old error")
     task["created_at"] = old_completed_at
@@ -2945,7 +3051,7 @@ def test_period_returns_payload_prunes_finished_task_after_retention():
         web_app._backtest_tasks[task_key] = task
 
     with patch.object(web_app, "_get_backtest_cache", return_value=None):
-        payload = web_app._get_period_returns_payload("007343", "v6", "2025-01-20")
+        payload = web_app._get_period_returns_payload("007343", "v6", params_hash, "2025-01-20")
 
     assert payload["status"] == "error"
     assert payload["error"] == "区间收益任务不存在，请重新分析"
@@ -2953,14 +3059,15 @@ def test_period_returns_payload_prunes_finished_task_after_retention():
 
 
 def test_cache_hit_prunes_terminal_task_from_memory():
-    task_key = web_app._backtest_task_key("007343", "v6", "2025-01-20")
+    params_hash = "abc123"
+    task_key = web_app._backtest_task_key("007343", "v6", params_hash, "2025-01-20")
     task = web_app._create_backtest_task(status=web_app.BACKTEST_STATUS_ERROR, error="boom")
     with web_app._backtest_tasks_lock:
         web_app._backtest_tasks[task_key] = task
 
     ready_returns = [{"label": "近1年", "days": 365, "strategy_pct": 11.1, "fund_pct": 8.2}]
     with patch.object(web_app, "_get_backtest_cache", return_value=ready_returns):
-        payload = web_app._get_period_returns_payload("007343", "v6", "2025-01-20")
+        payload = web_app._get_period_returns_payload("007343", "v6", params_hash, "2025-01-20")
 
     assert payload["status"] == "ready"
     assert payload["period_returns"] == ready_returns
@@ -3062,8 +3169,8 @@ def test_analyze_api_keeps_200_when_period_returns_background_state_errors():
 @pytest.mark.parametrize(
     ("fund_type", "requested_strategy", "expected_strategy", "expected_available_ids", "expected_param_subset"),
     [
-        ("active_a", "", "regime_adaptive", ["v6", "regime_adaptive"], {"max_position_ratio": 0.8, "bull_dca_boost": 1.5}),
-        ("active_hk", "", "regime_adaptive", ["v6", "regime_adaptive"], {"max_position_ratio": 0.7, "bull_dca_boost": 1.3}),
+        ("active_a", "", "active_equity_cn", ["v6", "regime_adaptive", "active_equity_cn"], {"max_position_ratio": 0.95, "bull_dca_boost": 1.6}),
+        ("active_hk", "", "active_equity_hk", ["v6", "regime_adaptive", "active_equity_hk"], {"max_position_ratio": 0.72, "bear_exit_rsi": 58}),
         ("index_a", "", "index_momentum", ["v6", "regime_adaptive", "index_momentum"], {"max_position_ratio": 0.95, "momentum_buy_threshold": 2}),
         ("index_hk", "", "index_momentum", ["v6", "regime_adaptive", "index_momentum"], {"max_position_ratio": 0.85, "momentum_buy_threshold": 3}),
         ("bond_pure", "", "bond_stability", ["bond_stability"], {"max_position_ratio": 0.6, "volatility_guard_window": 60}),

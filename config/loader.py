@@ -28,22 +28,76 @@ _fund_fetcher: Optional[FundFetcher] = None
 _fund_classifier: Optional[FundClassifier] = None
 logger = logging.getLogger(__name__)
 
+ACTIVE_EQUITY_CN_DEFAULTS: dict[str, Any] = {
+    "max_position_ratio": 0.92,
+    "soft_stop_loss": -0.18,
+    "hard_stop_loss": -0.25,
+    "min_cooldown": 6,
+    "max_cooldown": 18,
+    "dca_base_ratio": 0.05,
+    "dca_interval": 6,
+    "cheap_percentile": 0.2,
+    "batch_interval": 3,
+    "min_history_days": 250,
+    "trend_batch_ratios": [0.25, 0.20, 0.15],
+    "re_entry_strong_ratio": 0.9,
+    "re_entry_weak_ratio": 0.75,
+    "low_position_ratio": 0.3,
+    "rsi_sell_threshold": 70,
+    "adx_trend_threshold": 25,
+    "bull_dca_boost": 1.4,
+    "transition_buy_ratio": 0.15,
+    "transition_sell_ratio": 0.12,
+    "momentum_entry_threshold": 2,
+    "follow_through_min_score": 1,
+    "tail_size": 320,
+    "percentile_window": 250,
+}
+
+ACTIVE_EQUITY_HK_DEFAULTS: dict[str, Any] = {
+    "max_position_ratio": 0.72,
+    "soft_stop_loss": -0.16,
+    "hard_stop_loss": -0.23,
+    "min_cooldown": 10,
+    "max_cooldown": 28,
+    "dca_base_ratio": 0.03,
+    "dca_interval": 9,
+    "cheap_percentile": 0.18,
+    "batch_interval": 4,
+    "min_history_days": 250,
+    "trend_batch_ratios": [0.16, 0.12, 0.10],
+    "re_entry_strong_ratio": 0.75,
+    "re_entry_weak_ratio": 0.55,
+    "low_position_ratio": 0.25,
+    "rsi_sell_threshold": 68,
+    "adx_trend_threshold": 23,
+    "bull_dca_boost": 1.2,
+    "transition_buy_ratio": 0.1,
+    "transition_sell_ratio": 0.18,
+    "momentum_entry_threshold": 2,
+    "follow_through_min_score": 2,
+    "bear_exit_rsi": 58,
+    "tail_size": 320,
+    "percentile_window": 220,
+}
+
 PROFILE_TEMPLATES: dict[str, dict[str, Any]] = {
     "equity_active_cn": {
         "label": "A股主动权益",
         "description": "主动权益基金默认画像",
-        "default_strategy": "regime_adaptive",
-        "allowed_strategies": ["v6", "regime_adaptive"],
+        "default_strategy": "active_equity_cn",
+        "allowed_strategies": ["v6", "regime_adaptive", "active_equity_cn"],
         "strategy_params": {
             "v6": {},
             "regime_adaptive": {},
+            "active_equity_cn": {},
         },
     },
     "equity_active_hk": {
         "label": "港股主动权益",
         "description": "港股主动权益默认画像",
-        "default_strategy": "regime_adaptive",
-        "allowed_strategies": ["v6", "regime_adaptive"],
+        "default_strategy": "active_equity_hk",
+        "allowed_strategies": ["v6", "regime_adaptive", "active_equity_hk"],
         "strategy_params": {
             "v6": {
                 "max_position_ratio": 0.70,
@@ -66,6 +120,7 @@ PROFILE_TEMPLATES: dict[str, dict[str, Any]] = {
                 "transition_buy_ratio": 0.12,
                 "transition_sell_ratio": 0.35,
             },
+            "active_equity_hk": {},
         },
     },
     "equity_index_cn": {
@@ -375,6 +430,16 @@ def _load_legacy_strategy_params_from_config(
         params.update(copy.deepcopy(config.get(fund_code, {}).get(strategy, {})))
         return params
 
+    if strategy in {"active_equity_cn", "active_equity_hk"}:
+        dedicated_defaults = (
+            copy.deepcopy(ACTIVE_EQUITY_CN_DEFAULTS)
+            if strategy == "active_equity_cn"
+            else copy.deepcopy(ACTIVE_EQUITY_HK_DEFAULTS)
+        )
+        params = dedicated_defaults
+        params.update(copy.deepcopy(config.get(fund_code, {}).get(strategy, {})))
+        return params
+
     if strategy == "v6":
         params = base_params
         params.update(copy.deepcopy(config.get(fund_code, {}).get("v6", {})))
@@ -614,6 +679,8 @@ def build_profile_config_from_legacy(
     strategy_defaults = {
         "v6": copy.deepcopy(v6_defaults),
         "regime_adaptive": regime_defaults,
+        "active_equity_cn": copy.deepcopy(ACTIVE_EQUITY_CN_DEFAULTS),
+        "active_equity_hk": copy.deepcopy(ACTIVE_EQUITY_HK_DEFAULTS),
         "index_momentum": copy.deepcopy(defaults.get("index_momentum", {})),
         "bond_stability": copy.deepcopy(defaults.get("bond_stability", {})),
         "qdii_trend": copy.deepcopy(defaults.get("qdii_trend", {})),

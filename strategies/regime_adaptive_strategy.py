@@ -44,6 +44,8 @@ RSI_SELL_THRESHOLD = 70
 BULL_DCA_BOOST = 1.5        # 牛市定投加速倍数
 TRANSITION_BUY_RATIO = 0.15 # BEAR→BULL转换加仓比例
 TRANSITION_SELL_RATIO = 0.3 # BULL→BEAR转换减仓比例
+TRANSITION_SELL_REQUIRES_BREAKDOWN = False
+BULL_FOLLOW_THROUGH_ENTRY_ENABLED = False
 
 
 class RegimeAdaptiveStrategy:
@@ -89,6 +91,14 @@ class RegimeAdaptiveStrategy:
         self.p_bull_dca_boost = p.get("bull_dca_boost", BULL_DCA_BOOST)
         self.p_transition_buy_ratio = p.get("transition_buy_ratio", TRANSITION_BUY_RATIO)
         self.p_transition_sell_ratio = p.get("transition_sell_ratio", TRANSITION_SELL_RATIO)
+        self.p_transition_sell_requires_breakdown = p.get(
+            "transition_sell_requires_breakdown",
+            TRANSITION_SELL_REQUIRES_BREAKDOWN,
+        )
+        self.p_bull_follow_through_entry_enabled = p.get(
+            "bull_follow_through_entry_enabled",
+            BULL_FOLLOW_THROUGH_ENTRY_ENABLED,
+        )
         self.p_tail_size = p.get("tail_size", 300)
         self.p_percentile_window = p.get("percentile_window", 250)
 
@@ -127,7 +137,7 @@ class RegimeAdaptiveStrategy:
         self._update_cooldown(indicators)
 
         # ★ 新增：检测状态转换信号（不受冷静期限制）
-        transition_signal = self._check_regime_transition(position, nav)
+        transition_signal = self._check_regime_transition(position, nav, indicators)
         if transition_signal:
             return transition_signal
 
@@ -141,7 +151,7 @@ class RegimeAdaptiveStrategy:
 
     # ===== ★ 新增：状态转换信号 =====
 
-    def _check_regime_transition(self, position: Any, nav: float) -> Dict[str, Any]:
+    def _check_regime_transition(self, position: Any, nav: float, indicators: Dict[str, Any]) -> Dict[str, Any]:
         """检测市场状态转换，触发额外买入或卖出。"""
         if self.prev_regime == self.current_regime:
             return {}
@@ -160,6 +170,13 @@ class RegimeAdaptiveStrategy:
         if (self.current_regime == REGIME_BEAR and
                 self.prev_regime == REGIME_BULL and
                 position.total_shares > 0):
+            if self.p_transition_sell_requires_breakdown:
+                breakdown_confirmed = (
+                    not indicators.get("above_ma20", True)
+                    or indicators.get("macd_5d_negative", False)
+                )
+                if not breakdown_confirmed:
+                    return {}
             sell_shares = position.total_shares * self.p_transition_sell_ratio
             if sell_shares > 0:
                 self.pending_batches = []
@@ -225,7 +242,8 @@ class RegimeAdaptiveStrategy:
 
         # 买入信号：V6三重过滤
         signal_count = count_buy_signals(indicators, params=self._params)
-        if self.cooldown_remaining <= 0 and signal_count >= 2:
+        should_follow_through = self._should_use_bull_follow_through_entry(indicators, signal_count)
+        if self.cooldown_remaining <= 0 and (signal_count >= 2 or should_follow_through):
             self._create_batch_plan(nav)
             return self._execute_first_batch(position, nav, signal_count)
 
@@ -237,6 +255,21 @@ class RegimeAdaptiveStrategy:
                 return {"sell_shares": sell_shares}
 
         return {}
+
+    def _should_use_bull_follow_through_entry(self, indicators: Dict[str, Any], signal_count: int) -> bool:
+        """牛市强趋势延续时允许放宽首批趋势建仓门槛。"""
+        if not self.p_bull_follow_through_entry_enabled:
+            return False
+        if self.current_regime != REGIME_BULL:
+            return False
+        if signal_count < 1:
+            return False
+        if not indicators.get("above_ma20_3d", False):
+            return False
+        if indicators.get("macd_hist", 0.0) <= 0:
+            return False
+        # 仅 RSI 落在舒适区不算趋势确认，至少要有金叉或 MACD 转正。
+        return bool(indicators.get("gold_cross") or indicators.get("macd_turn_positive"))
 
     # ===== V6 辅助函数 =====
 

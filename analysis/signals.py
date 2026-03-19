@@ -16,6 +16,8 @@ from .indicators import (
 from ..strategies.bond_plus_balance_strategy import evaluate_bond_plus_balance_signal
 from ..strategies.bond_stability_strategy import evaluate_bond_stability_signal
 from ..strategies.qdii_trend_strategy import evaluate_qdii_trend_signal
+from ..strategies.active_equity_cn_strategy import evaluate_active_equity_cn_signal
+from ..strategies.active_equity_hk_strategy import evaluate_active_equity_hk_signal
 
 # 同方向信号最小间隔天数
 SIGNAL_MIN_INTERVAL = 5
@@ -274,6 +276,14 @@ def generate_recommendation_bond_plus_balance(history_df: pd.DataFrame, params: 
     return evaluate_bond_plus_balance_signal(history_df, params=params)
 
 
+def generate_recommendation_active_equity_cn(history_df: pd.DataFrame, params: Dict[str, Any] = None) -> Dict[str, Any]:
+    return evaluate_active_equity_cn_signal(history_df, params=params)
+
+
+def generate_recommendation_active_equity_hk(history_df: pd.DataFrame, params: Dict[str, Any] = None) -> Dict[str, Any]:
+    return evaluate_active_equity_hk_signal(history_df, params=params)
+
+
 def validate_recommendation_payload(recommendation: Dict[str, Any], strategy: str) -> Dict[str, Any]:
     """校验并归一化策略生成器返回值，避免下游处理时结构不稳定。"""
     if not isinstance(recommendation, dict):
@@ -495,6 +505,10 @@ def _get_rec_fn(strategy: str):
         return generate_recommendation_qdii_trend
     if strategy == "bond_plus_balance":
         return generate_recommendation_bond_plus_balance
+    if strategy == "active_equity_cn":
+        return generate_recommendation_active_equity_cn
+    if strategy == "active_equity_hk":
+        return generate_recommendation_active_equity_hk
     return generate_recommendation
 
 

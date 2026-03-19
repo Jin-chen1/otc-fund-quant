@@ -34,9 +34,9 @@ def test_resolve_strategy_context_maps_active_fund_to_profile(monkeypatch):
     context = strategy_loader.resolve_strategy_context("007343", "")
 
     assert context.profile_id == "equity_active_cn"
-    assert context.default_strategy == "regime_adaptive"
-    assert context.effective_strategy == "regime_adaptive"
-    assert [item["id"] for item in context.available_strategies] == ["v6", "regime_adaptive"]
+    assert context.default_strategy == "active_equity_cn"
+    assert context.effective_strategy == "active_equity_cn"
+    assert [item["id"] for item in context.available_strategies] == ["v6", "regime_adaptive", "active_equity_cn"]
 
 
 def test_resolve_strategy_context_maps_index_fund_to_profile(monkeypatch):
@@ -57,7 +57,7 @@ def test_resolve_strategy_context_adjusts_disallowed_strategy(monkeypatch):
 
     context = strategy_loader.resolve_strategy_context("007343", "index_momentum")
 
-    assert context.effective_strategy == "regime_adaptive"
+    assert context.effective_strategy == "active_equity_cn"
     assert context.strategy_adjusted is True
     assert context.adjustment_reason == "当前画像不支持 index_momentum，已切换为默认策略"
 
@@ -65,8 +65,8 @@ def test_resolve_strategy_context_adjusts_disallowed_strategy(monkeypatch):
 @pytest.mark.parametrize(
     ("fund_type", "profile_id", "default_strategy", "available_ids", "requested_strategy", "effective_strategy"),
     [
-        ("active_a", "equity_active_cn", "regime_adaptive", ["v6", "regime_adaptive"], "", "regime_adaptive"),
-        ("active_hk", "equity_active_hk", "regime_adaptive", ["v6", "regime_adaptive"], "", "regime_adaptive"),
+        ("active_a", "equity_active_cn", "active_equity_cn", ["v6", "regime_adaptive", "active_equity_cn"], "", "active_equity_cn"),
+        ("active_hk", "equity_active_hk", "active_equity_hk", ["v6", "regime_adaptive", "active_equity_hk"], "", "active_equity_hk"),
         ("index_a", "equity_index_cn", "index_momentum", ["v6", "regime_adaptive", "index_momentum"], "", "index_momentum"),
         ("index_hk", "equity_index_hk", "index_momentum", ["v6", "regime_adaptive", "index_momentum"], "", "index_momentum"),
         ("bond_pure", "bond_pure", "bond_stability", ["bond_stability"], "", "bond_stability"),
@@ -100,8 +100,10 @@ def test_resolve_strategy_context_category_matrix(
 @pytest.mark.parametrize(
     ("fund_type", "strategy", "expected_subset"),
     [
+        ("active_a", "active_equity_cn", {"max_position_ratio": 0.95, "dca_base_ratio": 0.06, "bull_dca_boost": 1.6}),
         ("active_hk", "v6", {"max_position_ratio": 0.70, "dca_base_ratio": 0.03, "dca_interval": 9}),
         ("active_hk", "regime_adaptive", {"bull_dca_boost": 1.30, "transition_buy_ratio": 0.12, "transition_sell_ratio": 0.35}),
+        ("active_hk", "active_equity_hk", {"max_position_ratio": 0.72, "dca_base_ratio": 0.03, "bear_exit_rsi": 58}),
         ("index_hk", "index_momentum", {"max_position_ratio": 0.85, "momentum_buy_threshold": 3, "atr_scale_max": 1.6}),
         ("bond_pure", "bond_stability", {"max_position_ratio": 0.60, "volatility_guard_window": 60, "drawdown_exit_threshold": 0.025}),
         ("bond_plus", "bond_plus_balance", {"max_position_ratio": 0.68, "drawdown_guard_threshold": 0.05, "batch_ratios": [0.12, 0.08]}),
@@ -116,6 +118,41 @@ def test_resolve_strategy_context_applies_category_specific_params(monkeypatch, 
 
     for key, expected_value in expected_subset.items():
         assert context.strategy_params[key] == expected_value
+
+
+def test_resolve_strategy_context_applies_015916_regime_override(monkeypatch):
+    monkeypatch.setattr(strategy_loader, "_fetch_fund_info", lambda fund_code: {"name": "测试主动权益"})
+    monkeypatch.setattr(strategy_loader, "_classify_fund", lambda fund_code, fund_info=None: "active_a")
+
+    context = strategy_loader.resolve_strategy_context("015916", "regime_adaptive")
+
+    assert context.profile_id == "equity_active_cn"
+    assert context.effective_strategy == "regime_adaptive"
+    expected_subset = {
+        "max_position_ratio": 0.95,
+        "dca_base_ratio": 0.06,
+        "trend_batch_ratios": [0.25, 0.20, 0.15],
+        "bull_dca_boost": 1.6,
+        "transition_buy_ratio": 0.20,
+        "transition_sell_ratio": 0.10,
+        "transition_sell_requires_breakdown": True,
+        "bull_follow_through_entry_enabled": True,
+    }
+    for key, expected_value in expected_subset.items():
+        assert context.strategy_params[key] == expected_value
+
+
+def test_resolve_strategy_context_keeps_non_overridden_active_fund_on_profile_defaults(monkeypatch):
+    monkeypatch.setattr(strategy_loader, "_fetch_fund_info", lambda fund_code: {"name": "测试主动权益"})
+    monkeypatch.setattr(strategy_loader, "_classify_fund", lambda fund_code, fund_info=None: "active_a")
+
+    context = strategy_loader.resolve_strategy_context("007343", "active_equity_cn")
+
+    assert context.strategy_params["max_position_ratio"] == 0.95
+    assert context.strategy_params["dca_base_ratio"] == 0.06
+    assert context.strategy_params["bull_dca_boost"] == 1.6
+    assert context.strategy_params["transition_sell_requires_breakdown"] is True
+    assert context.strategy_params["bull_follow_through_entry_enabled"] is True
 
 
 def test_profile_param_merge_precedence(monkeypatch, tmp_path):

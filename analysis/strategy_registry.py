@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from typing import Callable, Iterable
 
 from otc_fund_quant.analysis.signals import (
+    generate_recommendation_active_equity_cn,
+    generate_recommendation_active_equity_hk,
     generate_recommendation_bond_plus_balance,
     generate_recommendation_bond_stability,
     generate_recommendation,
@@ -50,6 +52,30 @@ _STRATEGY_DEFINITIONS: "OrderedDict[str, StrategyDefinition]" = OrderedDict(
                     "融合估值、RSI、MACD 与 ATR 风险控制。"
                 ),
                 generator=generate_recommendation_regime,
+            ),
+        ),
+        (
+            "active_equity_cn",
+            StrategyDefinition(
+                id="active_equity_cn",
+                label="A股主动权益",
+                description=(
+                    "面向A股主动权益基金的收益优先策略，强调仓位利用率、趋势延续跟随、"
+                    "熊市跌破确认后再减仓。"
+                ),
+                generator=generate_recommendation_active_equity_cn,
+            ),
+        ),
+        (
+            "active_equity_hk",
+            StrategyDefinition(
+                id="active_equity_hk",
+                label="港股主动权益",
+                description=(
+                    "面向港股主动权益基金的保守趋势策略，强化中短期趋势确认、"
+                    "提高弱势退出敏感度并降低仓位上限。"
+                ),
+                generator=generate_recommendation_active_equity_hk,
             ),
         ),
         (

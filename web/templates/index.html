@@ -392,21 +392,20 @@
         <!-- 历史记录 -->
         <div class="card" style="padding: 24px;">
             <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
-                <h3 style="font-size: 15px; font-weight: 700;">历史建议记录</h3>
+                <h3 style="font-size: 15px; font-weight: 700;">近一年回测成交记录</h3>
                 <div id="rec-summary" class="mono" style="font-size: 13px; color: var(--text-muted);"></div>
             </div>
-            <div id="rec-history-empty" class="hidden" style="color: var(--text-muted); font-size: 13px; padding: 20px 0; text-align: center;">暂无记录</div>
+            <div id="rec-history-empty" class="hidden" style="color: var(--text-muted); font-size: 13px; padding: 20px 0; text-align: center;">近一年暂无成交记录</div>
             <div style="overflow-x: auto;">
                 <table id="rec-table" class="data-table hidden">
                     <thead>
                         <tr>
-                            <th>日期</th>
-                            <th>建议</th>
-                            <th>当日NAV</th>
-                            <th>次日NAV</th>
-                            <th>涨跌</th>
-                            <th>结果</th>
-                            <th>理由</th>
+                            <th>成交日</th>
+                            <th>方向</th>
+                            <th>成交净值</th>
+                            <th>成交金额</th>
+                            <th>成交份额</th>
+                            <th>触发日</th>
                         </tr>
                     </thead>
                     <tbody id="rec-tbody"></tbody>
@@ -427,6 +426,11 @@ let _periodReturnsPollTimer = null;
 let _analysisToken = 0;
 let _pendingPeriodReturnsContext = null;
 let _isAnalyzeLoading = false;
+let _signalChartResizeObserver = null;
+let _signalChartResizeFrame = null;
+let _signalChartResizeDelay = null;
+let _signalChartRelayoutHandler = null;
+let _signalChartWindowResizeBound = false;
 const DEFAULT_STRATEGY_HINT = '首次分析后显示可用策略';
 const PERIOD_RETURNS_FAST_INTERVAL_MS = 2000;
 const PERIOD_RETURNS_SLOW_INTERVAL_MS = 5000;
@@ -517,8 +521,8 @@ async function analyzeFund() {
         if (!resp.ok) { showError(data.error || '分析失败'); return; }
 
         currentData = data;
-        renderAll(data, requestToken);
         document.getElementById('main-content').classList.remove('hidden');
+        renderAll(data, requestToken);
         document.getElementById('update-time').textContent = new Date().toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
     } catch (e) {
         if (e.name === 'AbortError') return; // 被新请求取消，忽略
@@ -537,8 +541,8 @@ function renderAll(data, analysisToken) {
     renderRecommendation(data.recommendation, isRegime);
     renderIndicators(data.recommendation.indicators, isRegime);
     renderPeriodReturnsSection(data, analysisToken);
-    renderSignalChart(data.chart, data.signal_points);
-    renderRecHistory(data.rec_history);
+    renderSignalChart(data.chart, data.trade_points);
+    renderRecHistory(data.trade_history);
     renderStrategyParams(data.strategy_params, isRegime);
 
     const adxCard = document.getElementById('card-adx');
@@ -721,6 +725,7 @@ function setPendingPeriodReturnsContext(context) {
     const sameContext = _pendingPeriodReturnsContext &&
         _pendingPeriodReturnsContext.fund_code === context.fund_code &&
         _pendingPeriodReturnsContext.strategy === context.strategy &&
+        _pendingPeriodReturnsContext.params_hash === context.params_hash &&
         _pendingPeriodReturnsContext.end_date === context.end_date;
 
     _pendingPeriodReturnsContext = {
@@ -808,6 +813,7 @@ function renderPeriodReturnsSection(data, analysisToken) {
         setPendingPeriodReturnsContext({
             fund_code: data.fund_code,
             strategy: data.strategy,
+            params_hash: data.period_returns_params_hash,
             end_date: data.period_returns_end_date,
         });
     } else {
@@ -974,6 +980,94 @@ function _monthLabels(dates) {
     return _monthTicks(dates).map(d => d.substring(2, 4) + '.' + d.substring(5, 7));
 }
 
+function _resizeSignalChart(chartEl) {
+    if (!chartEl || !chartEl.isConnected || chartEl.offsetParent === null) return;
+    Plotly.Plots.resize(chartEl);
+}
+
+function scheduleSignalChartResize(chartEl) {
+    if (!chartEl) return;
+
+    if (_signalChartResizeFrame) {
+        cancelAnimationFrame(_signalChartResizeFrame);
+        _signalChartResizeFrame = null;
+    }
+    if (_signalChartResizeDelay) {
+        clearTimeout(_signalChartResizeDelay);
+        _signalChartResizeDelay = null;
+    }
+
+    _signalChartResizeFrame = requestAnimationFrame(() => {
+        _signalChartResizeFrame = null;
+        _resizeSignalChart(chartEl);
+    });
+    _signalChartResizeDelay = setTimeout(() => {
+        _signalChartResizeDelay = null;
+        _resizeSignalChart(chartEl);
+    }, 80);
+}
+
+function ensureSignalChartResizeObserver(chartEl) {
+    if (!chartEl) return;
+    const resizeTarget = chartEl.parentElement || chartEl;
+
+    if (typeof ResizeObserver === 'function') {
+        if (_signalChartResizeObserver) return;
+        _signalChartResizeObserver = new ResizeObserver(() => {
+            scheduleSignalChartResize(chartEl);
+        });
+        _signalChartResizeObserver.observe(resizeTarget);
+        return;
+    }
+
+    if (!_signalChartWindowResizeBound) {
+        window.addEventListener('resize', () => {
+            scheduleSignalChartResize(document.getElementById('chart-signals'));
+        });
+        _signalChartWindowResizeBound = true;
+    }
+}
+
+function bindSignalChartRelayout(chartEl, chartSeries) {
+    if (!chartEl) return;
+    if (_signalChartRelayoutHandler) {
+        chartEl.removeListener('plotly_relayout', _signalChartRelayoutHandler);
+    }
+
+    let adjustingY = false;
+    _signalChartRelayoutHandler = function(eventData) {
+        if (adjustingY) return;
+        let xRange = eventData['xaxis.range'];
+        if (!xRange) {
+            const x0 = eventData['xaxis.range[0]'];
+            const x1 = eventData['xaxis.range[1]'];
+            if (x0 !== undefined && x1 !== undefined) xRange = [x0, x1];
+            else return;
+        }
+
+        const x0 = Math.max(0, Math.floor(xRange[0]));
+        const x1 = Math.min(chartSeries.nav.length - 1, Math.ceil(xRange[1]));
+        if (x0 >= x1) return;
+
+        let yMin = Infinity;
+        let yMax = -Infinity;
+        for (let i = x0; i <= x1; i++) {
+            const vals = [chartSeries.nav[i], chartSeries.ma20[i], chartSeries.ma60[i]].filter(v => v != null && !isNaN(v));
+            for (const v of vals) {
+                if (v < yMin) yMin = v;
+                if (v > yMax) yMax = v;
+            }
+        }
+        if (yMin === Infinity) return;
+
+        const pad = (yMax - yMin) * 0.08 || 0.01;
+        adjustingY = true;
+        Plotly.relayout(chartEl, { 'yaxis.range': [yMin - pad, yMax + pad] }).then(() => { adjustingY = false; });
+    };
+
+    chartEl.on('plotly_relayout', _signalChartRelayoutHandler);
+}
+
 // ===== 买卖点标记图（暗色主题） =====
 function renderSignalChart(chart, signals) {
     if (!chart || !signals) return;
@@ -1012,7 +1106,7 @@ function renderSignalChart(chart, signals) {
     const darkLayout = {
         paper_bgcolor: 'rgba(0,0,0,0)',
         plot_bgcolor: 'rgba(0,0,0,0)',
-        title: { text: '近一年买卖点标记', font: { size: 13, color: '#94a3b8', family: 'Noto Sans SC' }, x: 0.01, xanchor: 'left' },
+        title: { text: '近一年真实回测成交点', font: { size: 13, color: '#94a3b8', family: 'Noto Sans SC' }, x: 0.01, xanchor: 'left' },
         dragmode: 'pan',
         xaxis: {
             type: 'category', nticks: 12,
@@ -1039,43 +1133,23 @@ function renderSignalChart(chart, signals) {
     };
 
     const chartEl = document.getElementById('chart-signals');
-    Plotly.newPlot(chartEl, [navTrace, ma20Trace, ma60Trace, buyTrace, sellTrace], darkLayout,
-        { responsive: true, displayModeBar: false, scrollZoom: true,
-          doubleClickDelay: 1000, showTips: false });
+    const traces = [navTrace, ma20Trace, ma60Trace, buyTrace, sellTrace];
+    const config = {
+        responsive: true,
+        displayModeBar: false,
+        scrollZoom: true,
+        doubleClickDelay: 1000,
+        showTips: false,
+    };
 
-    // 缩放时自动调整Y轴范围，使曲线始终居中
-    let _adjustingY = false;
-    chartEl.on('plotly_relayout', function(eventData) {
-        if (_adjustingY) return;
-        let xRange = eventData['xaxis.range'];
-        if (!xRange) {
-            const x0 = eventData['xaxis.range[0]'];
-            const x1 = eventData['xaxis.range[1]'];
-            if (x0 !== undefined && x1 !== undefined) xRange = [x0, x1];
-            else return;
-        }
-
-        const x0 = Math.max(0, Math.floor(xRange[0]));
-        const x1 = Math.min(nav1y.length - 1, Math.ceil(xRange[1]));
-        if (x0 >= x1) return;
-
-        let yMin = Infinity, yMax = -Infinity;
-        for (let i = x0; i <= x1; i++) {
-            const vals = [nav1y[i], ma201y[i], ma601y[i]].filter(v => v != null && !isNaN(v));
-            for (const v of vals) {
-                if (v < yMin) yMin = v;
-                if (v > yMax) yMax = v;
-            }
-        }
-        if (yMin === Infinity) return;
-
-        const pad = (yMax - yMin) * 0.08 || 0.01;
-        _adjustingY = true;
-        Plotly.relayout(chartEl, { 'yaxis.range': [yMin - pad, yMax + pad] }).then(() => { _adjustingY = false; });
+    Plotly.react(chartEl, traces, darkLayout, config).then(() => {
+        bindSignalChartRelayout(chartEl, { nav: nav1y, ma20: ma201y, ma60: ma601y });
+        ensureSignalChartResizeObserver(chartEl);
+        scheduleSignalChartResize(chartEl);
     });
 }
 
-// ===== 历史建议表格 =====
+// ===== 回测成交表格 =====
 function renderRecHistory(records) {
     const tbody = document.getElementById('rec-tbody');
     const table = document.getElementById('rec-table');
@@ -1093,45 +1167,28 @@ function renderRecHistory(records) {
     empty.classList.add('hidden');
     tbody.innerHTML = '';
 
-    let judged = records.filter(r => r.correct === 1 || r.correct === 0);
-    let correctCount = judged.filter(r => r.correct === 1).length;
-    let totalJudged = judged.length;
     if (summary) {
-        if (totalJudged > 0) {
-            let pct = Math.round(correctCount / totalJudged * 100);
-            let color = pct >= 60 ? 'var(--accent-buy)' : pct >= 40 ? 'var(--accent-hold)' : 'var(--accent-sell)';
-            summary.innerHTML = `<span style="color:${color}">正确率 ${correctCount}/${totalJudged} (${pct}%)</span>`;
-        } else {
-            summary.textContent = '近期均为观望';
-        }
+        const buyCount = records.filter(r => r.action === 'BUY').length;
+        const sellCount = records.filter(r => r.action === 'SELL').length;
+        summary.innerHTML = `<span style="color:var(--accent-buy)">BUY ${buyCount}</span> / <span style="color:var(--accent-sell)">SELL ${sellCount}</span>`;
     }
 
     records.forEach(r => {
         const tr = document.createElement('tr');
 
         let actionColor = r.action === 'BUY' ? 'var(--accent-buy)' : r.action === 'SELL' ? 'var(--accent-sell)' : 'var(--accent-hold)';
-
-        let changeText = '--', changeColor = 'var(--text-muted)';
-        if (r.nav_at_signal && r.next_day_nav) {
-            let pct = ((r.next_day_nav - r.nav_at_signal) / r.nav_at_signal * 100).toFixed(2);
-            changeText = (pct > 0 ? '+' : '') + pct + '%';
-            changeColor = pct > 0 ? 'var(--accent-sell)' : pct < 0 ? 'var(--accent-buy)' : 'var(--text-muted)';
-        }
-
-        let correctText = '', correctCls = 'correct-pending';
-        if (r.correct === 1) { correctText = '✓ 正确'; correctCls = 'correct-yes'; }
-        else if (r.correct === 0) { correctText = '✗ 错误'; correctCls = 'correct-no'; }
-        else if (r.next_day_nav) { correctText = '-'; }
-        else { correctText = '待验证'; }
+        const navText = typeof r.nav === 'number' ? r.nav.toFixed(4) : '--';
+        const amountText = typeof r.amount === 'number' ? r.amount.toFixed(2) : '--';
+        const sharesText = typeof r.shares === 'number' ? r.shares.toFixed(4) : '--';
+        const decisionDateText = r.decision_date || '--';
 
         tr.innerHTML = `
-            <td class="mono" style="color:var(--text-secondary)">${r.date}</td>
+            <td class="mono" style="color:var(--text-secondary)">${r.date || '--'}</td>
             <td class="mono" style="font-weight:700; color:${actionColor}">${r.action}</td>
-            <td class="mono">${r.nav_at_signal ? r.nav_at_signal.toFixed(4) : '--'}</td>
-            <td class="mono">${r.next_day_nav ? r.next_day_nav.toFixed(4) : '--'}</td>
-            <td class="mono" style="color:${changeColor}">${changeText}</td>
-            <td class="${correctCls}">${correctText}</td>
-            <td style="color:var(--text-muted); font-size:12px; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${r.reason || ''}">${r.reason || '--'}</td>
+            <td class="mono">${navText}</td>
+            <td class="mono">${amountText}</td>
+            <td class="mono">${sharesText}</td>
+            <td class="mono" style="color:var(--text-muted)">${decisionDateText}</td>
         `;
         tbody.appendChild(tr);
     });

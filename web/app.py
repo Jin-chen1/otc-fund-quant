@@ -7,6 +7,7 @@ import os
 import sqlite3
 import json
 import math
+import hashlib
 import copy
 import re
 import logging
@@ -33,7 +34,7 @@ from otc_fund_quant.analysis.signals import (
     generate_signal_points,
     validate_recommendation_payload,
 )
-from otc_fund_quant.analysis.backtest import calc_period_returns
+from otc_fund_quant.analysis.backtest import calc_period_returns, get_backtest_trades
 from otc_fund_quant.analysis.chart import get_chart_data
 from otc_fund_quant.analysis.strategy_registry import get_strategy_definition
 from otc_fund_quant.config.loader import resolve_strategy_context
@@ -75,7 +76,7 @@ BACKTEST_STATUS_READY = "ready"
 BACKTEST_STATUS_PENDING = "pending"
 BACKTEST_STATUS_ERROR = "error"
 BACKTEST_EXECUTOR_WORKERS = 1
-BACKTEST_TASK_KEY = tuple[str, str, str]
+BACKTEST_TASK_KEY = tuple[str, str, str, str]
 BACKTEST_PENDING_TTL = timedelta(minutes=15)
 BACKTEST_FINISHED_TTL = timedelta(minutes=10)
 INDICATOR_RESPONSE_KEYS = (
@@ -158,16 +159,39 @@ def _init_rec_db():
                         UNIQUE(date, fund_code, strategy)
                     )
                 """)
+            backtest_cursor = conn.execute("PRAGMA table_info(backtest_cache)")
+            backtest_columns = [row[1] for row in backtest_cursor.fetchall()]
+            if backtest_columns and "params_hash" not in backtest_columns:
+                conn.execute("ALTER TABLE backtest_cache RENAME TO backtest_cache_legacy")
+                conn.execute("""
+                    CREATE TABLE backtest_cache (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        fund_code TEXT NOT NULL,
+                        strategy TEXT NOT NULL,
+                        params_hash TEXT NOT NULL,
+                        end_date TEXT NOT NULL,
+                        results_json TEXT NOT NULL,
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(fund_code, strategy, params_hash, end_date)
+                    )
+                """)
+                conn.execute("DROP TABLE backtest_cache_legacy")
+            else:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS backtest_cache (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        fund_code TEXT NOT NULL,
+                        strategy TEXT NOT NULL,
+                        params_hash TEXT NOT NULL,
+                        end_date TEXT NOT NULL,
+                        results_json TEXT NOT NULL,
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(fund_code, strategy, params_hash, end_date)
+                    )
+                """)
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS backtest_cache (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    fund_code TEXT NOT NULL,
-                    strategy TEXT NOT NULL,
-                    end_date TEXT NOT NULL,
-                    results_json TEXT NOT NULL,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(fund_code, strategy, end_date)
-                )
+                CREATE INDEX IF NOT EXISTS idx_backtest_cache_lookup
+                ON backtest_cache (fund_code, strategy, params_hash, end_date DESC)
             """)
             conn.execute(f"""
                 CREATE TABLE IF NOT EXISTS dca_records (
@@ -207,23 +231,23 @@ _init_rec_db()
 BACKTEST_CACHE_TTL_DAYS = 7
 
 
-def _get_backtest_cache(fund_code: str, strategy: str, end_date: str):
+def _get_backtest_cache(fund_code: str, strategy: str, params_hash: str, end_date: str):
     """读取回测缓存，TTL天内直接复用旧缓存，无需精确匹配end_date。"""
     conn = connect_sqlite(REC_DB_PATH)
     cursor = conn.cursor()
     try:
         # 先精确匹配
         cursor.execute(
-            "SELECT results_json FROM backtest_cache WHERE fund_code=? AND strategy=? AND end_date=?",
-            (fund_code, strategy, end_date),
+            "SELECT results_json FROM backtest_cache WHERE fund_code=? AND strategy=? AND params_hash=? AND end_date=?",
+            (fund_code, strategy, params_hash, end_date),
         )
         row = cursor.fetchone()
         if row:
             return json.loads(row[0])
         # 查找最近的缓存，TTL内复用
         cursor.execute(
-            "SELECT results_json, created_at FROM backtest_cache WHERE fund_code=? AND strategy=? ORDER BY end_date DESC LIMIT 1",
-            (fund_code, strategy),
+            "SELECT results_json, created_at FROM backtest_cache WHERE fund_code=? AND strategy=? AND params_hash=? ORDER BY end_date DESC LIMIT 1",
+            (fund_code, strategy, params_hash),
         )
         row = cursor.fetchone()
     finally:
@@ -238,14 +262,14 @@ def _get_backtest_cache(fund_code: str, strategy: str, end_date: str):
     return None
 
 
-def _save_backtest_cache(fund_code: str, strategy: str, end_date: str, results: list):
+def _save_backtest_cache(fund_code: str, strategy: str, params_hash: str, end_date: str, results: list):
     """保存回测结果到缓存。"""
     def _action():
         conn = connect_sqlite(REC_DB_PATH)
         try:
             conn.execute(
-                "INSERT OR REPLACE INTO backtest_cache (fund_code, strategy, end_date, results_json) VALUES (?, ?, ?, ?)",
-                (fund_code, strategy, end_date, json.dumps(results, ensure_ascii=False)),
+                "INSERT OR REPLACE INTO backtest_cache (fund_code, strategy, params_hash, end_date, results_json) VALUES (?, ?, ?, ?, ?)",
+                (fund_code, strategy, params_hash, end_date, json.dumps(results, ensure_ascii=False)),
             )
             conn.commit()
         finally:
@@ -256,6 +280,25 @@ def _save_backtest_cache(fund_code: str, strategy: str, end_date: str, results: 
 
 def _backtest_now() -> datetime:
     return datetime.now()
+
+
+def _normalize_backtest_params_for_hash(value: Any):
+    if isinstance(value, dict):
+        return {
+            str(key): _normalize_backtest_params_for_hash(val)
+            for key, val in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_backtest_params_for_hash(item) for item in value]
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    return value
+
+
+def _stable_backtest_params_hash(params: dict[str, Any] | None) -> str:
+    normalized = _normalize_backtest_params_for_hash(params or {})
+    payload = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _normalize_indicator_value(value):
@@ -384,8 +427,8 @@ def _ensure_backtest_executor() -> ThreadPoolExecutor | None:
     return _backtest_executor
 
 
-def _backtest_task_key(fund_code: str, strategy: str, end_date: str) -> BACKTEST_TASK_KEY:
-    return (fund_code, strategy, end_date)
+def _backtest_task_key(fund_code: str, strategy: str, params_hash: str, end_date: str) -> BACKTEST_TASK_KEY:
+    return (fund_code, strategy, params_hash, end_date)
 
 
 def _snapshot_backtest_task(task_key: BACKTEST_TASK_KEY) -> dict[str, Any] | None:
@@ -433,6 +476,7 @@ def _finalize_backtest_task(task_key: BACKTEST_TASK_KEY, expected_task_id: str, 
 def _run_backtest_task(
     fund_code: str,
     strategy: str,
+    params_hash: str,
     end_date: str,
     history_df: pd.DataFrame,
     params: dict[str, Any],
@@ -441,11 +485,12 @@ def _run_backtest_task(
     start = perf_counter()
     try:
         period_returns = calc_period_returns(history_df, strategy=strategy, params=params)
-        _save_backtest_cache(fund_code, strategy, end_date, period_returns)
+        _save_backtest_cache(fund_code, strategy, params_hash, end_date, period_returns)
         logger.info(
-            "backtest_done fund_code=%s strategy=%s end_date=%s elapsed=%.2fs",
+            "backtest_done fund_code=%s strategy=%s params_hash=%s end_date=%s elapsed=%.2fs",
             fund_code,
             strategy,
+            params_hash,
             end_date,
             perf_counter() - start,
         )
@@ -456,9 +501,10 @@ def _run_backtest_task(
         }
     except Exception as exc:
         logger.exception(
-            "backtest_failed fund_code=%s strategy=%s end_date=%s elapsed=%.2fs error=%s",
+            "backtest_failed fund_code=%s strategy=%s params_hash=%s end_date=%s elapsed=%.2fs error=%s",
             fund_code,
             strategy,
+            params_hash,
             end_date,
             perf_counter() - start,
             exc,
@@ -473,20 +519,22 @@ def _run_backtest_task(
 def _queue_backtest_task(
     fund_code: str,
     strategy: str,
+    params_hash: str,
     end_date: str,
     history_df: pd.DataFrame,
     params: dict[str, Any],
 ) -> dict[str, Any]:
     """提交后台回测任务；相同 key 若已在运行则直接复用。"""
     _prune_backtest_tasks()
-    task_key = _backtest_task_key(fund_code, strategy, end_date)
+    task_key = _backtest_task_key(fund_code, strategy, params_hash, end_date)
     with _backtest_tasks_lock:
         existing = _backtest_tasks.get(task_key)
         if existing and existing.get("status") == BACKTEST_STATUS_PENDING:
             logger.info(
-                "backtest_deduped fund_code=%s strategy=%s end_date=%s",
+                "backtest_deduped fund_code=%s strategy=%s params_hash=%s end_date=%s",
                 fund_code,
                 strategy,
+                params_hash,
                 end_date,
             )
             return {
@@ -524,6 +572,7 @@ def _queue_backtest_task(
             _run_backtest_task,
             fund_code,
             strategy,
+            params_hash,
             end_date,
             history_df.copy(deep=True),
             dict(params or {}),
@@ -539,9 +588,10 @@ def _queue_backtest_task(
                     period_returns=None,
                 )
         logger.exception(
-            "backtest_failed fund_code=%s strategy=%s end_date=%s reason=submit_failed error=%s",
+            "backtest_failed fund_code=%s strategy=%s params_hash=%s end_date=%s reason=submit_failed error=%s",
             fund_code,
             strategy,
+            params_hash,
             end_date,
             exc,
         )
@@ -562,9 +612,10 @@ def _queue_backtest_task(
 
     future.add_done_callback(lambda fut, key=task_key, expected_task_id=task_id: _finalize_backtest_task(key, expected_task_id, fut))
     logger.info(
-        "backtest_queued fund_code=%s strategy=%s end_date=%s",
+        "backtest_queued fund_code=%s strategy=%s params_hash=%s end_date=%s",
         fund_code,
         strategy,
+        params_hash,
         end_date,
     )
     return {
@@ -574,21 +625,22 @@ def _queue_backtest_task(
     }
 
 
-def _get_period_returns_payload(fund_code: str, strategy: str, end_date: str) -> dict[str, Any]:
+def _get_period_returns_payload(fund_code: str, strategy: str, params_hash: str, end_date: str) -> dict[str, Any]:
     """读取区间收益状态：优先缓存，其次内存中的后台任务状态。"""
     _prune_backtest_tasks()
-    period_returns = _get_backtest_cache(fund_code, strategy, end_date)
+    period_returns = _get_backtest_cache(fund_code, strategy, params_hash, end_date)
     if period_returns is not None:
         with _backtest_tasks_lock:
-            if _backtest_tasks.pop(_backtest_task_key(fund_code, strategy, end_date), None) is not None:
+            if _backtest_tasks.pop(_backtest_task_key(fund_code, strategy, params_hash, end_date), None) is not None:
                 logger.info(
                     "backtest_pruned task_key=%s",
-                    _backtest_task_key(fund_code, strategy, end_date),
+                    _backtest_task_key(fund_code, strategy, params_hash, end_date),
                 )
         logger.info(
-            "cache_hit fund_code=%s strategy=%s end_date=%s",
+            "cache_hit fund_code=%s strategy=%s params_hash=%s end_date=%s",
             fund_code,
             strategy,
+            params_hash,
             end_date,
         )
         return {
@@ -597,7 +649,7 @@ def _get_period_returns_payload(fund_code: str, strategy: str, end_date: str) ->
             "error": None,
         }
 
-    task = _snapshot_backtest_task(_backtest_task_key(fund_code, strategy, end_date))
+    task = _snapshot_backtest_task(_backtest_task_key(fund_code, strategy, params_hash, end_date))
     if task is not None:
         return task
 
@@ -611,16 +663,32 @@ def _get_period_returns_payload(fund_code: str, strategy: str, end_date: str) ->
 def _ensure_period_returns(
     fund_code: str,
     strategy: str,
+    params_hash: str,
     end_date: str,
     history_df: pd.DataFrame,
     params: dict[str, Any],
 ) -> dict[str, Any]:
     """确保区间收益要么已缓存，要么已进入后台排队。"""
     _prune_backtest_tasks()
-    cached_payload = _get_period_returns_payload(fund_code, strategy, end_date)
+    cached_payload = _get_period_returns_payload(fund_code, strategy, params_hash, end_date)
     if cached_payload["status"] == BACKTEST_STATUS_READY:
         return cached_payload
-    return _queue_backtest_task(fund_code, strategy, end_date, history_df, params)
+    return _queue_backtest_task(fund_code, strategy, params_hash, end_date, history_df, params)
+
+
+def _resolve_period_returns_params_hash(
+    fund_code: str,
+    strategy: str,
+    raw_params_hash: str = "",
+) -> str:
+    params_hash = str(raw_params_hash or "").strip()
+    if params_hash:
+        return params_hash
+    try:
+        strategy_context = resolve_strategy_context(fund_code, strategy)
+        return _stable_backtest_params_hash(strategy_context.strategy_params)
+    except Exception:
+        return _stable_backtest_params_hash({})
 
 
 def _reset_backtest_runtime_state(wait: bool = False):
@@ -1445,16 +1513,26 @@ def api_analyze():
         # 7. 从DB读取完整信号点用于图表展示
         signal_points = _get_all_signal_points(fund_code, strategy)
 
-        # 8. 获取历史推荐记录
+        # 8. 提取最近一年真实回测成交点与成交记录
+        trade_payload = get_backtest_trades(
+            history_df,
+            strategy=strategy,
+            params=strategy_params,
+            days=365,
+        )
+
+        # 8.5 获取历史推荐记录（保留用于推荐审计）
         rec_history = _get_recommendations(fund_code, strategy)
 
         normalized_indicators = _normalize_indicator_payload(recommendation.get("indicators"))
 
         # 9. 计算各周期策略回测收益（优先读缓存）
         cache_end_date = latest_date.strftime("%Y-%m-%d") if hasattr(latest_date, "strftime") else str(latest_date)
+        period_returns_params_hash = _stable_backtest_params_hash(strategy_params)
         period_returns_payload = _ensure_period_returns(
             fund_code,
             strategy,
+            period_returns_params_hash,
             cache_end_date,
             history_df,
             strategy_params,
@@ -1473,6 +1551,7 @@ def api_analyze():
             "period_returns_status": period_returns_payload["status"],
             "period_returns_error": period_returns_payload["error"],
             "period_returns_end_date": cache_end_date,
+            "period_returns_params_hash": period_returns_params_hash,
             "recommendation": {
                 "action": recommendation["action"],
                 "reason": recommendation["reason"],
@@ -1481,6 +1560,8 @@ def api_analyze():
                 "indicators": normalized_indicators,
             },
             "chart": chart_data,
+            "trade_points": trade_payload["trade_points"],
+            "trade_history": trade_payload["trade_history"],
             "signal_points": signal_points,
             "rec_history": rec_history,
         }
@@ -1510,6 +1591,11 @@ def api_period_returns():
     fund_code = str(request.args.get("fund_code", "")).strip()
     strategy = str(request.args.get("strategy", "")).strip()
     end_date = str(request.args.get("end_date", "")).strip()
+    params_hash = _resolve_period_returns_params_hash(
+        fund_code,
+        strategy,
+        str(request.args.get("params_hash", "")).strip(),
+    )
 
     if not fund_code:
         return jsonify({"error": "请输入基金代码"}), 400
@@ -1518,11 +1604,12 @@ def api_period_returns():
     if not end_date:
         return jsonify({"error": "缺少 end_date 参数"}), 400
 
-    payload = _get_period_returns_payload(fund_code, strategy, end_date)
+    payload = _get_period_returns_payload(fund_code, strategy, params_hash, end_date)
     return jsonify({
         "fund_code": fund_code,
         "strategy": strategy,
         "end_date": end_date,
+        "params_hash": params_hash,
         "status": payload["status"],
         "period_returns": payload["period_returns"],
         "error": payload["error"],

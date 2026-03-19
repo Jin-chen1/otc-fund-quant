@@ -188,7 +188,7 @@
         }
         .layout {
             display: grid;
-            grid-template-columns: 1.2fr 0.8fr;
+            grid-template-columns: 1fr;
             gap: 18px;
         }
         table {
@@ -229,36 +229,170 @@
             background: rgba(251, 191, 36, 0.12);
             color: var(--accent-warn);
         }
-        .detail-grid {
+        .detail-content {
             display: grid;
+            gap: 14px;
+        }
+        .detail-overview {
+            border: 1px solid rgba(45, 212, 191, 0.18);
+            border-radius: 14px;
+            padding: 18px;
+            background:
+                linear-gradient(135deg, rgba(45, 212, 191, 0.08), rgba(56, 189, 248, 0.03)),
+                rgba(17, 24, 39, 0.72);
+        }
+        .detail-overview-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
             gap: 12px;
+            margin-bottom: 14px;
+            flex-wrap: wrap;
+        }
+        .detail-kicker {
+            font-size: 11px;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: var(--accent-cyan);
+        }
+        .detail-identity {
+            display: grid;
+            gap: 4px;
+        }
+        .detail-primary {
+            font-size: 24px;
+            font-weight: 700;
+            line-height: 1.1;
+        }
+        .detail-secondary {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        .detail-pill-row {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .detail-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(30, 45, 74, 0.7);
+            background: rgba(10, 14, 23, 0.58);
+            font-size: 12px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+        .detail-pill.ok {
+            color: var(--accent-buy);
+            border-color: rgba(52, 211, 153, 0.25);
+            background: rgba(52, 211, 153, 0.1);
+        }
+        .detail-pill.fail {
+            color: var(--accent-sell);
+            border-color: rgba(248, 113, 113, 0.25);
+            background: rgba(248, 113, 113, 0.1);
+        }
+        .detail-pill.warn {
+            color: var(--accent-warn);
+            border-color: rgba(251, 191, 36, 0.25);
+            background: rgba(251, 191, 36, 0.1);
+        }
+        .detail-pill.info {
+            color: var(--accent-cyan);
+            border-color: rgba(56, 189, 248, 0.25);
+            background: rgba(56, 189, 248, 0.09);
+        }
+        .detail-overview-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 10px;
+        }
+        .overview-stat {
+            border: 1px solid rgba(30, 45, 74, 0.7);
+            border-radius: 12px;
+            padding: 12px 14px;
+            background: rgba(10, 14, 23, 0.46);
+        }
+        .overview-stat .label {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        .overview-stat .value {
+            font-size: 19px;
+            font-weight: 700;
+        }
+        .positive { color: var(--accent-buy); }
+        .negative { color: var(--accent-sell); }
+        .detail-sections {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+        }
+        .detail-span-full {
+            grid-column: 1 / -1;
         }
         .detail-box {
             border: 1px solid var(--border-primary);
             border-radius: 12px;
             padding: 14px;
             background: rgba(17, 24, 39, 0.68);
+            min-width: 0;
+        }
+        .detail-box-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
         }
         .detail-box h3 {
             font-size: 13px;
             margin-bottom: 10px;
             color: var(--accent-cyan);
         }
+        .detail-box-header h3 {
+            margin-bottom: 0;
+        }
+        .section-count {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
         .detail-list {
             display: grid;
-            gap: 8px;
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+            gap: 10px;
             font-size: 13px;
+            min-width: 0;
         }
         .detail-row {
-            display: flex;
-            justify-content: space-between;
-            gap: 12px;
-            border-bottom: 1px dashed rgba(30, 45, 74, 0.5);
-            padding-bottom: 8px;
+            display: grid;
+            gap: 6px;
+            border: 1px solid rgba(30, 45, 74, 0.7);
+            border-radius: 10px;
+            padding: 10px 12px;
+            background: rgba(10, 14, 23, 0.38);
+            min-width: 0;
         }
-        .detail-row:last-child { border-bottom: none; padding-bottom: 0; }
-        .detail-row span:first-child { color: var(--text-muted); }
-        .warning-list {
+        .detail-row span:first-child {
+            color: var(--text-muted);
+            font-size: 12px;
+        }
+        .detail-row span:last-child {
+            min-width: 0;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            line-height: 1.45;
+        }
+        .warning-list,
+        .stack-list {
             display: grid;
             gap: 8px;
             font-size: 13px;
@@ -270,12 +404,195 @@
             color: #fcd34d;
             line-height: 1.6;
         }
-        pre {
+        .warning-item.fail {
+            background: rgba(248, 113, 113, 0.08);
+            color: #fca5a5;
+        }
+        .warning-item.info {
+            background: rgba(56, 189, 248, 0.08);
+            color: #7dd3fc;
+        }
+        .source-groups {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 10px;
+        }
+        .source-group {
+            border: 1px solid rgba(30, 45, 74, 0.65);
+            border-radius: 12px;
+            padding: 12px;
+            background: rgba(10, 14, 23, 0.36);
+        }
+        .source-group-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .source-group-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        .source-group-count {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+        .source-list {
+            display: grid;
+            gap: 6px;
+            max-height: 180px;
+            overflow: auto;
+            padding-right: 4px;
+        }
+        .source-row {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 10px;
+            padding-bottom: 6px;
+            border-bottom: 1px dashed rgba(30, 45, 74, 0.45);
+            font-size: 12px;
+        }
+        .source-row:last-child {
+            border-bottom: none;
+            padding-bottom: 0;
+        }
+        .source-row-label {
+            color: var(--text-secondary);
+            word-break: break-all;
+        }
+        .source-row-value {
+            color: var(--text-primary);
+            text-align: right;
+            word-break: break-word;
+        }
+        .detail-table-wrap {
+            border: 1px solid rgba(30, 45, 74, 0.7);
+            border-radius: 12px;
+            background: rgba(10, 14, 23, 0.38);
+            overflow: auto;
+            max-height: 320px;
+        }
+        .detail-table {
+            width: 100%;
+            min-width: 880px;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        .detail-table th,
+        .detail-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid rgba(30, 45, 74, 0.5);
+            text-align: left;
+            vertical-align: top;
+        }
+        .detail-table th {
+            position: sticky;
+            top: 0;
+            background: #0d1524;
+            z-index: 1;
+        }
+        .detail-table td.wrap {
+            white-space: normal;
+            word-break: break-word;
+        }
+        .tag-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .tag {
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: rgba(251, 191, 36, 0.1);
+            border: 1px solid rgba(251, 191, 36, 0.22);
+            color: var(--accent-warn);
+            font-size: 12px;
+        }
+        .raw-json {
+            border: 1px solid rgba(30, 45, 74, 0.7);
+            border-radius: 12px;
+            background: rgba(10, 14, 23, 0.38);
+            overflow: hidden;
+        }
+        .raw-json summary {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 14px;
+            cursor: pointer;
+            list-style: none;
+            color: var(--text-primary);
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .raw-json summary::-webkit-details-marker {
+            display: none;
+        }
+        .raw-json[open] summary {
+            border-bottom: 1px solid rgba(30, 45, 74, 0.6);
+        }
+        .json-pre {
+            margin: 0;
+            padding: 14px;
+            max-height: 360px;
+            overflow: auto;
             white-space: pre-wrap;
             word-break: break-word;
             font-size: 12px;
             line-height: 1.6;
             color: var(--text-secondary);
+        }
+        .source-list,
+        .detail-table-wrap,
+        .json-pre,
+        .table-shell {
+            scrollbar-width: thin;
+            scrollbar-color: rgba(56, 189, 248, 0.5) rgba(10, 14, 23, 0.4);
+            scrollbar-gutter: stable;
+        }
+        .source-list::-webkit-scrollbar,
+        .detail-table-wrap::-webkit-scrollbar,
+        .json-pre::-webkit-scrollbar,
+        .table-shell::-webkit-scrollbar {
+            width: 10px;
+            height: 10px;
+        }
+        .source-list::-webkit-scrollbar-track,
+        .detail-table-wrap::-webkit-scrollbar-track,
+        .json-pre::-webkit-scrollbar-track,
+        .table-shell::-webkit-scrollbar-track {
+            background: rgba(10, 14, 23, 0.42);
+            border-radius: 999px;
+        }
+        .source-list::-webkit-scrollbar-thumb,
+        .detail-table-wrap::-webkit-scrollbar-thumb,
+        .json-pre::-webkit-scrollbar-thumb,
+        .table-shell::-webkit-scrollbar-thumb {
+            background: linear-gradient(180deg, rgba(56, 189, 248, 0.82), rgba(45, 212, 191, 0.58));
+            border: 2px solid rgba(10, 14, 23, 0.78);
+            border-radius: 999px;
+            min-height: 36px;
+        }
+        .source-list::-webkit-scrollbar-thumb:hover,
+        .detail-table-wrap::-webkit-scrollbar-thumb:hover,
+        .json-pre::-webkit-scrollbar-thumb:hover,
+        .table-shell::-webkit-scrollbar-thumb:hover {
+            background: linear-gradient(180deg, rgba(125, 211, 252, 0.9), rgba(45, 212, 191, 0.72));
+        }
+        .source-list::-webkit-scrollbar-button,
+        .detail-table-wrap::-webkit-scrollbar-button,
+        .json-pre::-webkit-scrollbar-button,
+        .table-shell::-webkit-scrollbar-button {
+            display: none;
+            width: 0;
+            height: 0;
         }
         .table-shell {
             max-height: 620px;
@@ -295,8 +612,13 @@
             font-size: 13px;
         }
         @media (max-width: 960px) {
-            .input-area, .layout { grid-template-columns: 1fr; }
+            .input-area, .layout, .detail-sections { grid-template-columns: 1fr; }
             .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+        @media (max-width: 640px) {
+            .summary-grid,
+            .detail-list,
+            .detail-overview-grid { grid-template-columns: 1fr; }
         }
     </style>
 </head>
@@ -367,7 +689,7 @@
         <div class="card">
             <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
                 <div class="title" style="font-size: 16px; margin-bottom: 0;">结果列表</div>
-                <div class="mono" style="font-size: 12px; color: var(--text-muted);" id="result-count">0 rows</div>
+                <div class="mono" style="font-size: 12px; color: var(--text-muted);" id="result-count">0 条结果</div>
             </div>
             <div class="table-shell">
                 <table>
@@ -391,34 +713,63 @@
 
         <div class="card">
             <div class="title" style="font-size: 16px;">结果详情</div>
-            <div class="subtitle" style="margin-bottom: 12px;">点击左侧任一行查看原始估值字段、告警和持仓代理明细。</div>
+            <div class="subtitle" style="margin-bottom: 12px;">点击左侧任一行查看结构化诊断、数据源摘要、代理与持仓明细，原始 JSON 默认折叠保留。</div>
 
             <div id="detail-empty" class="empty">尚未选择结果。</div>
-            <div id="detail-content" class="detail-grid hidden">
-                <div class="detail-box">
-                    <h3>基础字段</h3>
-                    <div class="detail-list" id="detail-meta"></div>
-                </div>
-                <div class="detail-box">
-                    <h3>告警</h3>
-                    <div id="detail-warnings"></div>
-                </div>
-                <div class="detail-box">
-                    <h3>质量门槛</h3>
-                    <div class="detail-list" id="detail-quality"></div>
-                    <div id="detail-quality-reasons"></div>
-                </div>
-                <div class="detail-box">
-                    <h3>数据源</h3>
-                    <pre id="detail-sources"></pre>
-                </div>
-                <div class="detail-box">
-                    <h3>代理指数与持仓明细</h3>
-                    <pre id="detail-breakdown"></pre>
-                </div>
-                <div class="detail-box">
-                    <h3>原始 JSON</h3>
-                    <pre id="detail-json"></pre>
+            <div id="detail-content" class="detail-content hidden">
+                <div class="detail-overview" id="detail-overview"></div>
+                <div class="detail-sections">
+                    <div class="detail-box">
+                        <h3>基础字段</h3>
+                        <div class="detail-list" id="detail-meta"></div>
+                    </div>
+                    <div class="detail-box">
+                        <div class="detail-box-header">
+                            <h3>告警与源冲突</h3>
+                            <div class="section-count mono" id="detail-warning-count">0 条</div>
+                        </div>
+                        <div class="warning-list" id="detail-warnings"></div>
+                    </div>
+                    <div class="detail-box">
+                        <div class="detail-box-header">
+                            <h3>质量门槛</h3>
+                            <div class="section-count mono" id="detail-quality-status">--</div>
+                        </div>
+                        <div class="detail-pill-row" id="detail-quality-badges" style="margin-bottom: 12px;"></div>
+                        <div class="detail-list" id="detail-quality"></div>
+                        <div class="stack-list" id="detail-quality-reasons" style="margin-top: 12px;"></div>
+                    </div>
+                    <div class="detail-box">
+                        <div class="detail-box-header">
+                            <h3>数据源</h3>
+                            <div class="section-count mono" id="detail-source-count">0 组</div>
+                        </div>
+                        <div id="detail-sources"></div>
+                    </div>
+                    <div class="detail-box detail-span-full">
+                        <div class="detail-box-header">
+                            <h3>代理指数</h3>
+                            <div class="section-count mono" id="detail-proxy-count">0 项</div>
+                        </div>
+                        <div id="detail-proxy-table"></div>
+                    </div>
+                    <div class="detail-box detail-span-full">
+                        <div class="detail-box-header">
+                            <h3>持仓明细</h3>
+                            <div class="section-count mono" id="detail-holdings-count">0 项</div>
+                        </div>
+                        <div id="detail-missing-quotes"></div>
+                        <div id="detail-holdings-table"></div>
+                    </div>
+                    <div class="detail-box detail-span-full">
+                        <details class="raw-json" id="detail-raw-json">
+                            <summary>
+                                <span>原始 JSON</span>
+                                <span class="mono" style="font-size: 11px; color: var(--text-muted);">默认折叠，展开用于排障</span>
+                            </summary>
+                            <pre class="json-pre" id="detail-json"></pre>
+                        </details>
+                    </div>
                 </div>
             </div>
         </div>
@@ -428,6 +779,85 @@
 <script>
 let currentResults = [];
 let selectedIndex = -1;
+const FUND_TYPE_LABELS = {
+    active_a: '主动权益',
+    active_hk: '港股主动',
+    index_a: '指数基金',
+    qdii: 'QDII基金',
+};
+const POSITION_SOURCE_LABELS = {
+    fund_disclosure: '基金披露仓位',
+    fund_disclosure_latest_report: '基金最新报告披露仓位',
+    input_parameter: '外部输入仓位',
+    default_assumption_fallback: '默认仓位回退',
+    adjusted_by_top10_weight: '按前十大持仓权重校准',
+    regression_three_factor: '三因子回归估算',
+    regression_beta_calibrated: 'Beta校准估算',
+};
+const POSITION_SNAPSHOT_SOURCE_LABELS = {
+    pingzhongdata_asset_allocation: '天天基金资产配置快照',
+};
+const QUALITY_POLICY_LABELS = {
+    quality_first: '质量优先',
+    best_effort: '尽力估值',
+};
+const SOURCE_VALUE_LABELS = {
+    sina_single_quote: '新浪个股实时行情',
+    sina_index_single_quote: '新浪指数实时行情',
+    eastmoney_single_quote: '东方财富实时行情',
+    safe_mid_rate: '安全中间价',
+    best_effort: '尽力获取',
+    fund_disclosure: '基金披露数据',
+};
+const SOURCE_CATEGORY_ORDER = [
+    'a_share_quotes',
+    'hk_share_quotes',
+    'proxy_indices',
+    'proxy_tracking_targets',
+    'fx',
+    'a_indices',
+    'hk_indices',
+    'stock_position',
+];
+const SOURCE_CATEGORY_LABELS = {
+    a_share_quotes: 'A股持仓行情',
+    hk_share_quotes: '港股持仓行情',
+    proxy_indices: '代理指数',
+    proxy_tracking_targets: '代理跟踪标的',
+    fx: '汇率',
+    a_indices: 'A股指数',
+    hk_indices: '港股指数',
+    stock_position: '股票仓位',
+};
+const PROXY_TARGET_LABELS = {
+    a_index: 'A股指数',
+    hk_index: '港股指数',
+    a_share_etf_proxy: 'A股ETF代理',
+};
+const PROXY_COLUMNS = [
+    { key: 'code', label: '代码', mono: true },
+    { key: 'quote_code', label: '行情代码', mono: true },
+    { key: 'name', label: '名称', wrap: true },
+    { key: 'market', label: '市场' },
+    { key: 'target_type', label: '类型', formatter: value => PROXY_TARGET_LABELS[value] || value || '--', wrap: true },
+    { key: 'weight', label: '权重', formatter: formatWeightRatio, mono: true },
+    { key: 'proxy_weight', label: '代理仓位', formatter: formatUnsignedPercent, mono: true },
+    { key: 'local_return_pct', label: '本地收益', formatter: formatPercent, mono: true },
+    { key: 'fx_return_pct', label: '汇率收益', formatter: formatPercent, mono: true },
+    { key: 'rmb_return_pct', label: '人民币收益', formatter: formatPercent, mono: true },
+    { key: 'contribution', label: '贡献', formatter: formatPercent, mono: true },
+];
+const HOLDING_COLUMNS = [
+    { key: 'code', label: '代码', mono: true },
+    { key: 'name', label: '名称', wrap: true },
+    { key: 'market', label: '市场' },
+    { key: 'weight', label: '权重', formatter: formatUnsignedPercent, mono: true },
+    { key: 'change_pct', label: '涨跌', formatter: formatPercent, mono: true },
+    { key: 'local_return_pct', label: '本地收益', formatter: formatPercent, mono: true },
+    { key: 'fx_return_pct', label: '汇率收益', formatter: formatPercent, mono: true },
+    { key: 'rmb_return_pct', label: '人民币收益', formatter: formatPercent, mono: true },
+    { key: 'contribution', label: '贡献', formatter: formatPercent, mono: true },
+];
 
 function setError(message) {
     const el = document.getElementById('error-box');
@@ -453,7 +883,7 @@ function renderResults(results) {
     const empty = document.getElementById('results-empty');
     const count = document.getElementById('result-count');
     tbody.innerHTML = '';
-    count.textContent = `${currentResults.length} rows`;
+    count.textContent = `${currentResults.length} 条结果`;
 
     if (currentResults.length === 0) {
         empty.classList.remove('hidden');
@@ -469,7 +899,7 @@ function renderResults(results) {
         tr.innerHTML = `
             <td class="mono">${item.fund_code || '--'}</td>
             <td class="${statusClass}">${item.status || '--'}</td>
-            <td class="mono">${item.fund_type || '--'}</td>
+            <td>${escapeHtml(formatFundType(item.fund_type))}</td>
             <td class="mono">${item.nav_date || '--'}</td>
             <td class="mono">${formatNumber(item.estimated_nav, 4)}</td>
             <td class="mono">${formatPercent(item.estimated_return)}</td>
@@ -489,17 +919,28 @@ function renderDetail(item, index) {
 
     const empty = document.getElementById('detail-empty');
     const content = document.getElementById('detail-content');
+    const overview = document.getElementById('detail-overview');
     const meta = document.getElementById('detail-meta');
+    const warningCount = document.getElementById('detail-warning-count');
     const warnings = document.getElementById('detail-warnings');
+    const qualityStatus = document.getElementById('detail-quality-status');
+    const qualityBadges = document.getElementById('detail-quality-badges');
     const quality = document.getElementById('detail-quality');
     const qualityReasons = document.getElementById('detail-quality-reasons');
+    const sourceCount = document.getElementById('detail-source-count');
     const detailSources = document.getElementById('detail-sources');
-    const breakdown = document.getElementById('detail-breakdown');
+    const proxyCount = document.getElementById('detail-proxy-count');
+    const proxyTable = document.getElementById('detail-proxy-table');
+    const holdingsCount = document.getElementById('detail-holdings-count');
+    const missingQuotes = document.getElementById('detail-missing-quotes');
+    const holdingsTable = document.getElementById('detail-holdings-table');
     const detailJson = document.getElementById('detail-json');
+    const detailRawJson = document.getElementById('detail-raw-json');
 
     if (!item) {
         empty.classList.remove('hidden');
         content.classList.add('hidden');
+        detailRawJson.open = false;
         return;
     }
 
@@ -507,18 +948,11 @@ function renderDetail(item, index) {
     content.classList.remove('hidden');
 
     const details = item.details || {};
-    const metaPairs = [
-        ['基金代码', item.fund_code],
-        ['状态', item.status],
-        ['基金类型', item.fund_type],
-        ['净值日期', item.nav_date],
-        ['目标日期', item.target_date],
-        ['估算净值', formatNumber(item.estimated_nav, 4)],
-        ['估算涨跌', formatPercent(item.estimated_return)],
-        ['置信度', formatNumber(item.confidence_score, 4)],
+    renderOverview(overview, item, details);
+    renderPairList(meta, [
         ['QDII画像', details.qdii_market_profile || '--'],
-        ['仓位来源', details.position_source || '--'],
-        ['仓位快照来源', details.position_snapshot_source || details.stock_position_snapshot_source || '--'],
+        ['仓位来源', formatPositionSource(details.position_source)],
+        ['仓位快照来源', formatSnapshotSource(details.position_snapshot_source || details.stock_position_snapshot_source)],
         ['仓位报告日期', details.position_report_date || details.stock_position_report_date || '--'],
         ['仓位报告期', details.position_raw_report_period || details.stock_position_raw_report_period || '--'],
         ['测算仓位最新值', formatPercent(details.estimated_position_series_latest)],
@@ -529,58 +963,297 @@ function renderDetail(item, index) {
         ['实时覆盖率(持仓)', formatPercent(details.live_quote_coverage_pct)],
         ['实时覆盖率(仓位)', formatPercent(details.live_quote_weight_pct)],
         ['代理收益', formatPercent(details.proxy_return)],
+        ['代理仓位', formatUnsignedPercent(details.proxy_weight)],
         ['费率拖累', formatPercent(details.fee_drag)],
-    ];
-    meta.innerHTML = metaPairs.map(([label, value]) => `
-        <div class="detail-row">
-            <span>${label}</span>
-            <span class="mono">${value == null || value === '' ? '--' : value}</span>
-        </div>
-    `).join('');
+    ], '暂无基础字段。');
 
-    const warningItems = item.warnings || [];
-    if (warningItems.length === 0) {
-        warnings.innerHTML = '<div class="empty">无告警。</div>';
-    } else {
-        warnings.innerHTML = warningItems.map(text => `<div class="warning-item">${escapeHtml(text)}</div>`).join('');
-    }
-
-    const qualityPairs = [
-        ['质量策略', details.quality_policy || '--'],
-        ['门槛通过', details.quality_gate_passed == null ? '--' : String(details.quality_gate_passed)],
-        ['源冲突数', (details.source_disagreements || []).length],
-    ];
-    quality.innerHTML = qualityPairs.map(([label, value]) => `
-        <div class="detail-row">
-            <span>${label}</span>
-            <span class="mono">${value == null || value === '' ? '--' : value}</span>
-        </div>
-    `).join('');
-
-    const failedReasons = details.quality_gate_failed_reasons || [];
-    if (failedReasons.length === 0) {
-        qualityReasons.innerHTML = '<div class="empty">无质量门槛失败原因。</div>';
-    } else {
-        qualityReasons.innerHTML = failedReasons.map(text => `<div class="warning-item">${escapeHtml(text)}</div>`).join('');
-    }
-
-    detailSources.textContent = JSON.stringify({
-        used_sources: details.used_sources || {},
-        source_disagreements: details.source_disagreements || [],
-    }, null, 2);
-
-    const breakdownObj = {
-        proxy_components: details.proxy_components || [],
-        holdings_details: details.holdings_details || [],
-        missing_quotes: details.missing_quotes || [],
-    };
-    breakdown.textContent = JSON.stringify(breakdownObj, null, 2);
+    renderWarnings(warnings, warningCount, item.warnings || [], details.source_disagreements || []);
+    renderQuality(quality, qualityBadges, qualityStatus, qualityReasons, details);
+    renderSources(detailSources, sourceCount, details.used_sources || {});
+    renderTable(proxyTable, proxyCount, details.proxy_components || [], PROXY_COLUMNS, '暂无代理指数明细。');
+    renderMissingQuotes(missingQuotes, details.missing_quotes || []);
+    renderTable(holdingsTable, holdingsCount, details.holdings_details || [], HOLDING_COLUMNS, '暂无持仓明细。');
     detailJson.textContent = JSON.stringify(item, null, 2);
+    detailRawJson.open = false;
+}
+
+function renderOverview(container, item, details) {
+    const warningsCount = (item.warnings || []).length + (details.source_disagreements || []).length;
+    const missingQuotesCount = (details.missing_quotes || []).length;
+    const qualityPassed = details.quality_gate_passed;
+    const qualityTone = qualityPassed === true ? 'ok' : qualityPassed === false ? 'fail' : 'info';
+    const returnValue = formatPercent(item.estimated_return);
+    const returnTone = !hasMeaningfulValue(returnValue) ? '' : returnValue.startsWith('-') ? 'negative' : 'positive';
+    const secondaryParts = [
+        formatFundType(item.fund_type),
+        details.qdii_market_profile ? `QDII画像 ${details.qdii_market_profile}` : null,
+    ].filter(Boolean);
+
+    container.innerHTML = `
+        <div class="detail-overview-head">
+            <div class="detail-identity">
+                <div class="detail-kicker mono">估值快照</div>
+                <div class="detail-primary mono">${escapeHtml(item.fund_code || '--')}</div>
+                <div class="detail-secondary">${escapeHtml(secondaryParts.join(' · ') || '结构化诊断面板')}</div>
+            </div>
+            <div class="detail-pill-row">
+                ${buildPill(item.status || '未知状态', item.status === '失败' ? 'fail' : 'ok')}
+                ${buildPill(
+                    qualityPassed === true ? '质量门槛通过' : qualityPassed === false ? '质量门槛未通过' : '质量门槛未知',
+                    qualityTone,
+                )}
+                ${buildPill(`异常 ${warningsCount} 条`, warningsCount > 0 ? 'warn' : 'ok')}
+                ${buildPill(`缺行情 ${missingQuotesCount} 项`, missingQuotesCount > 0 ? 'warn' : 'ok')}
+            </div>
+        </div>
+        <div class="detail-overview-grid">
+            ${renderOverviewStat('基金类型', formatFundType(item.fund_type))}
+            ${renderOverviewStat('净值日期', item.nav_date || '--')}
+            ${renderOverviewStat('目标日期', item.target_date || '--')}
+            ${renderOverviewStat('估算净值', formatNumber(item.estimated_nav, 4))}
+            ${renderOverviewStat('估算涨跌', returnValue, returnTone)}
+            ${renderOverviewStat('置信度', formatNumber(item.confidence_score, 4))}
+        </div>
+    `;
+}
+
+function renderOverviewStat(label, value, toneClass = '') {
+    const displayValue = hasMeaningfulValue(value) ? value : '--';
+    return `
+        <div class="overview-stat">
+            <div class="label">${escapeHtml(label)}</div>
+            <div class="value mono ${toneClass}">${escapeHtml(displayValue)}</div>
+        </div>
+    `;
+}
+
+function renderWarnings(container, countEl, items, sourceDisagreements) {
+    const warnings = items || [];
+    const disagreements = sourceDisagreements || [];
+    const mergedCount = warnings.length + disagreements.length;
+    countEl.textContent = `${mergedCount} 条`;
+    if (mergedCount === 0) {
+        container.innerHTML = '<div class="empty">无告警或源冲突。</div>';
+        return;
+    }
+    container.innerHTML = [
+        ...warnings.map(text => `<div class="warning-item">${escapeHtml(text)}</div>`),
+        ...disagreements.map(text => `<div class="warning-item info">源冲突: ${escapeHtml(text)}</div>`),
+    ].join('');
+}
+
+function renderQuality(container, badgesEl, statusEl, reasonsEl, details) {
+    const sourceDisagreements = details.source_disagreements || [];
+    const failedReasons = details.quality_gate_failed_reasons || [];
+    const qualityPassed = details.quality_gate_passed;
+    const qualityStatus = qualityPassed === true ? '通过' : qualityPassed === false ? '未通过' : '--';
+    const qualityPolicy = formatQualityPolicy(details.quality_policy);
+    statusEl.textContent = qualityStatus;
+
+    renderPairList(container, [
+        ['质量策略', qualityPolicy],
+        ['门槛状态', qualityStatus],
+        ['源冲突数', String(sourceDisagreements.length)],
+        ['失败原因数', String(failedReasons.length)],
+    ], '无质量门槛数据。');
+
+    badgesEl.innerHTML = [
+        buildPill(qualityPolicy || '未声明策略', 'info'),
+        buildPill(
+            qualityPassed === true ? '质量门槛通过' : qualityPassed === false ? '质量门槛未通过' : '质量门槛未知',
+            qualityPassed === true ? 'ok' : qualityPassed === false ? 'fail' : 'info',
+        ),
+        buildPill(`源冲突 ${sourceDisagreements.length} 项`, sourceDisagreements.length > 0 ? 'warn' : 'ok'),
+    ].join('');
+
+    if (failedReasons.length === 0) {
+        reasonsEl.innerHTML = '<div class="empty">无质量门槛失败原因。</div>';
+        return;
+    }
+    reasonsEl.innerHTML = failedReasons.map(text => `<div class="warning-item fail">${escapeHtml(text)}</div>`).join('');
+}
+
+function renderSources(container, countEl, usedSources) {
+    const groups = Object.entries(usedSources || {})
+        .filter(([category]) => category !== 'proxy_indices')
+        .sort(([left], [right]) => sourceCategoryRank(left) - sourceCategoryRank(right));
+    countEl.textContent = `${groups.length} 组`;
+
+    const groupsHtml = groups.length === 0
+        ? '<div class="empty">无数据源记录。</div>'
+        : `
+            <div class="source-groups">
+                ${groups.map(([category, payload]) => {
+                    const rows = normalizeSourceRows(payload);
+                    return `
+                        <div class="source-group">
+                            <div class="source-group-header">
+                                <div class="source-group-title">${escapeHtml(SOURCE_CATEGORY_LABELS[category] || category)}</div>
+                                <div class="source-group-count mono">${rows.length} 项</div>
+                            </div>
+                            <div class="source-list">
+                                ${rows.map(([key, value]) => `
+                                    <div class="source-row">
+                                        <div class="source-row-label mono">${escapeHtml(key)}</div>
+                                        <div class="source-row-value">${escapeHtml(value)}</div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+        `;
+
+    container.innerHTML = groupsHtml;
+}
+
+function renderMissingQuotes(container, items) {
+    if (items.length === 0) {
+        container.innerHTML = '';
+        return;
+    }
+    container.innerHTML = `
+        <div class="tag-list">
+            ${items.map(code => `<span class="tag mono">缺行情 ${escapeHtml(code)}</span>`).join('')}
+        </div>
+    `;
+}
+
+function renderTable(container, countEl, rows, columns, emptyText) {
+    countEl.textContent = `${rows.length} 项`;
+    if (rows.length === 0) {
+        container.innerHTML = `<div class="empty">${escapeHtml(emptyText)}</div>`;
+        return;
+    }
+
+    container.innerHTML = `
+        <div class="detail-table-wrap">
+            <table class="detail-table">
+                <thead>
+                    <tr>
+                        ${columns.map(column => `<th>${escapeHtml(column.label)}</th>`).join('')}
+                    </tr>
+                </thead>
+                <tbody>
+                    ${rows.map(row => `
+                        <tr>
+                            ${columns.map(column => {
+                                const rawValue = row?.[column.key];
+                                const formattedValue = column.formatter ? column.formatter(rawValue, row) : formatGenericValue(rawValue);
+                                const className = [column.mono ? 'mono' : '', column.wrap ? 'wrap' : ''].filter(Boolean).join(' ');
+                                return `<td class="${className}">${escapeHtml(formattedValue)}</td>`;
+                            }).join('')}
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+    `;
+}
+
+function renderPairList(container, pairs, emptyText) {
+    const validPairs = pairs.filter(([, value]) => hasMeaningfulValue(value));
+    if (validPairs.length === 0) {
+        container.innerHTML = `<div class="empty">${escapeHtml(emptyText)}</div>`;
+        return;
+    }
+    container.innerHTML = validPairs.map(([label, value]) => `
+        <div class="detail-row">
+            <span>${escapeHtml(label)}</span>
+            <span class="mono">${escapeHtml(formatGenericValue(value))}</span>
+        </div>
+    `).join('');
+}
+
+function buildPill(label, tone = 'info') {
+    return `<span class="detail-pill ${tone}">${escapeHtml(label)}</span>`;
+}
+
+function normalizeSourceRows(payload) {
+    if (payload == null) {
+        return [['value', '--']];
+    }
+    if (Array.isArray(payload)) {
+        return payload.length === 0
+            ? [['value', '--']]
+            : payload.map((item, index) => [`item_${index + 1}`, formatSourceValue(item)]);
+    }
+    if (typeof payload !== 'object') {
+        return [['value', formatSourceValue(payload)]];
+    }
+    const entries = Object.entries(payload);
+    if (entries.length === 0) {
+        return [['value', '--']];
+    }
+    return entries.map(([key, value]) => [key, formatSourceValue(value)]);
+}
+
+function formatSourceValue(value) {
+    if (value == null || value === '') return '--';
+    if (typeof value === 'number') {
+        return Number.isInteger(value) ? `${value} 次` : String(value);
+    }
+    if (typeof value === 'boolean') {
+        return value ? 'true' : 'false';
+    }
+    if (Array.isArray(value)) {
+        return value.length === 0 ? '--' : value.join(', ');
+    }
+    if (typeof value === 'object') {
+        return JSON.stringify(value);
+    }
+    return SOURCE_VALUE_LABELS[value] || String(value);
+}
+
+function sourceCategoryRank(category) {
+    const index = SOURCE_CATEGORY_ORDER.indexOf(category);
+    return index === -1 ? SOURCE_CATEGORY_ORDER.length + 100 : index;
+}
+
+function hasMeaningfulValue(value) {
+    return value != null && value !== '' && value !== '--';
+}
+
+function formatGenericValue(value) {
+    if (value == null || value === '') return '--';
+    return String(value);
+}
+
+function formatFundType(value) {
+    if (value == null || value === '') return '--';
+    return FUND_TYPE_LABELS[value] || String(value);
+}
+
+function formatPositionSource(value) {
+    if (value == null || value === '') return '--';
+    return POSITION_SOURCE_LABELS[value] || String(value);
+}
+
+function formatSnapshotSource(value) {
+    if (value == null || value === '') return '--';
+    return POSITION_SNAPSHOT_SOURCE_LABELS[value] || String(value);
+}
+
+function formatQualityPolicy(value) {
+    if (value == null || value === '') return '--';
+    return QUALITY_POLICY_LABELS[value] || String(value);
 }
 
 function formatNumber(value, digits) {
     if (value == null || Number.isNaN(Number(value))) return '--';
     return Number(value).toFixed(digits);
+}
+
+function formatWeightRatio(value) {
+    if (value == null || Number.isNaN(Number(value))) return '--';
+    const num = Number(value);
+    return formatUnsignedPercent(Math.abs(num) <= 1.0000001 ? num * 100 : num);
+}
+
+function formatUnsignedPercent(value) {
+    if (value == null || Number.isNaN(Number(value))) return '--';
+    return `${Number(value).toFixed(2)}%`;
 }
 
 function formatPercent(value) {
