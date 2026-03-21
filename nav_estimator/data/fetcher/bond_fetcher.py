@@ -18,6 +18,7 @@ class BondFetcher(BaseFetcher):
         "treasury": "中债国债全价指数",
         "credit": "中债信用债全价指数",
     }
+    COMPREHENSIVE_INDEX_TYPE = "comprehensive"
 
     def __init__(self, historical_provider: HistoricalDataProvider | None = None):
         self.historical_provider = historical_provider or AkshareHistoricalDataProvider()
@@ -37,31 +38,12 @@ class BondFetcher(BaseFetcher):
     @BaseFetcher.retry_on_error(max_retries=3)
     def get_bond_index_snapshot(self, index_type: str = "comprehensive") -> dict[str, Any]:
         logger.info(f"获取债券指数快照: {index_type}")
-        bond_df = ak.bond_zh_index_daily()
-        if bond_df.empty:
-            raise ValueError("中债指数数据为空")
-
-        required_columns = {"指数名称", "收盘"}
-        if not required_columns.issubset(set(bond_df.columns)):
-            raise ValueError(f"中债指数字段异常，实际字段: {list(bond_df.columns)}")
-
-        date_column = self._resolve_date_column(bond_df, "中债指数数据")
-        target_name = self._resolve_index_name(index_type)
-        target_df = bond_df[bond_df["指数名称"] == target_name].copy()
-        if target_df.empty:
-            raise ValueError(f"未找到债券指数: {target_name}")
-
-        target_df[date_column] = pd.to_datetime(target_df[date_column], errors="coerce")
-        target_df["收盘"] = pd.to_numeric(target_df["收盘"], errors="coerce")
-        target_df = target_df.dropna(subset=[date_column, "收盘"])
-        if len(target_df) < 2:
-            raise ValueError(f"债券指数 {target_name} 数据不足，无法计算单日涨跌幅")
-
-        target_df = target_df.sort_values(by=date_column).tail(2)
+        target_df = self._get_bond_index_history_df(index_type=index_type, end_date=None).tail(2)
+        target_name = str(target_df.attrs.get("index_name", self._resolve_index_name(index_type)))
         prev_row = target_df.iloc[0]
         curr_row = target_df.iloc[1]
-        prev_close = float(prev_row["收盘"])
-        curr_close = float(curr_row["收盘"])
+        prev_close = float(prev_row["close"])
+        curr_close = float(curr_row["close"])
         if prev_close <= 0:
             raise ValueError(f"债券指数 {target_name} 前值非法: {prev_close}")
 
@@ -69,8 +51,8 @@ class BondFetcher(BaseFetcher):
         snapshot = {
             "index_type": index_type,
             "index_name": target_name,
-            "prev_date": prev_row[date_column].date().isoformat(),
-            "curr_date": curr_row[date_column].date().isoformat(),
+            "prev_date": prev_row["date"].date().isoformat(),
+            "curr_date": curr_row["date"].date().isoformat(),
             "prev_close": prev_close,
             "curr_close": curr_close,
             "change_pct": change_pct,
@@ -197,31 +179,62 @@ class BondFetcher(BaseFetcher):
         bond_df = self.get_bond_index_history()
         if bond_df.empty:
             raise ValueError("中债指数数据为空")
-        required_columns = {"指数名称", "收盘"}
-        if not required_columns.issubset(set(bond_df.columns)):
+        target_name = self._resolve_index_name(index_type)
+
+        if {"指数名称", "收盘"}.issubset(set(bond_df.columns)):
+            date_column = self._resolve_date_column(bond_df, "中债指数数据")
+            target_df = bond_df[bond_df["指数名称"] == target_name].copy()
+            if target_df.empty and index_type != self.COMPREHENSIVE_INDEX_TYPE:
+                fallback_name = self._resolve_index_name(self.COMPREHENSIVE_INDEX_TYPE)
+                logger.warning(
+                    f"当前债券指数数据源未提供 {target_name}，回退使用 {fallback_name}"
+                )
+                target_name = fallback_name
+                target_df = bond_df[bond_df["指数名称"] == target_name].copy()
+            if target_df.empty:
+                raise ValueError(f"未找到债券指数: {target_name}")
+
+            target_df[date_column] = pd.to_datetime(target_df[date_column], errors="coerce")
+            target_df["收盘"] = pd.to_numeric(target_df["收盘"], errors="coerce")
+            target_df = target_df.dropna(subset=[date_column, "收盘"])
+            if target_df.empty:
+                raise ValueError(f"债券指数 {target_name} 历史数据解析失败")
+
+            target_df = (
+                target_df.sort_values(by=date_column)
+                .drop_duplicates(subset=[date_column], keep="last")
+                .rename(columns={date_column: "date", "收盘": "close"})
+                .reset_index(drop=True)
+            )
+        elif {"date", "value"}.issubset(set(bond_df.columns)):
+            if index_type != self.COMPREHENSIVE_INDEX_TYPE:
+                fallback_name = self._resolve_index_name(self.COMPREHENSIVE_INDEX_TYPE)
+                logger.warning(
+                    f"当前 AKShare 版本仅提供中债综合指数接口，请求 {target_name} 时回退使用 {fallback_name}"
+                )
+                target_name = fallback_name
+
+            target_df = bond_df[["date", "value"]].copy()
+            target_df["date"] = pd.to_datetime(target_df["date"], errors="coerce")
+            target_df["value"] = pd.to_numeric(target_df["value"], errors="coerce")
+            target_df = target_df.dropna(subset=["date", "value"])
+            if target_df.empty:
+                raise ValueError(f"债券指数 {target_name} 历史数据解析失败")
+
+            target_df = (
+                target_df.sort_values(by="date")
+                .drop_duplicates(subset=["date"], keep="last")
+                .rename(columns={"value": "close"})
+                .reset_index(drop=True)
+            )
+        else:
             raise ValueError(f"中债指数字段异常，实际字段: {list(bond_df.columns)}")
 
-        date_column = self._resolve_date_column(bond_df, "中债指数数据")
-        target_name = self._resolve_index_name(index_type)
-        target_df = bond_df[bond_df["指数名称"] == target_name].copy()
-        if target_df.empty:
-            raise ValueError(f"未找到债券指数: {target_name}")
-
-        target_df[date_column] = pd.to_datetime(target_df[date_column], errors="coerce")
-        target_df["收盘"] = pd.to_numeric(target_df["收盘"], errors="coerce")
-        target_df = target_df.dropna(subset=[date_column, "收盘"])
-        if target_df.empty:
-            raise ValueError(f"债券指数 {target_name} 历史数据解析失败")
-
-        target_df = (
-            target_df.sort_values(by=date_column)
-            .drop_duplicates(subset=[date_column], keep="last")
-            .rename(columns={date_column: "date", "收盘": "close"})
-            .reset_index(drop=True)
-        )
         if end_date is not None:
             end_dt = pd.to_datetime(end_date).date()
             target_df = target_df[target_df["date"].dt.date <= end_dt].copy()
         if len(target_df) < 2:
             raise ValueError(f"债券指数 {target_name} 历史样本不足，无法计算收益率")
-        return target_df[["date", "close"]]
+        result_df = target_df[["date", "close"]].copy()
+        result_df.attrs["index_name"] = target_name
+        return result_df

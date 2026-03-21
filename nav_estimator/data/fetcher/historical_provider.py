@@ -73,7 +73,19 @@ class AkshareHistoricalDataProvider(HistoricalDataProvider):
             return ak.stock_hk_index_daily_sina(symbol=resolved_symbol)
 
     def get_bond_index_history(self) -> pd.DataFrame:
-        return ak.bond_zh_index_daily()
+        legacy_fetch = getattr(ak, "bond_zh_index_daily", None)
+        if callable(legacy_fetch):
+            return legacy_fetch()
+
+        new_composite_fetch = getattr(ak, "bond_new_composite_index_cbond", None)
+        if callable(new_composite_fetch):
+            return new_composite_fetch(indicator="全价", period="总值")
+
+        composite_fetch = getattr(ak, "bond_composite_index_cbond", None)
+        if callable(composite_fetch):
+            return composite_fetch(indicator="全价", period="总值")
+
+        raise AttributeError("akshare 缺少可用的中债综合指数接口")
 
     def get_fx_mid_history(self) -> pd.DataFrame:
         return ak.currency_boc_safe()

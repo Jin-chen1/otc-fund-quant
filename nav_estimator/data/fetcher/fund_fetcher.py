@@ -1519,7 +1519,9 @@ class FundFetcher(BaseFetcher):
     def resolve_index_tracking_target(self, fund_info: dict[str, Any]) -> dict[str, Any]:
         fund_code = str(fund_info.get("code", "")).strip()
         calibration = TRACKING_TARGET_CALIBRATIONS.get(fund_code)
-        if calibration is not None and self.is_etf_or_linked_fund(fund_info):
+        if calibration is not None and (
+            self.is_etf_or_linked_fund(fund_info) or bool(calibration.get("allow_non_linked", False))
+        ):
             return {
                 "target_type": str(calibration["target_type"]),
                 "security_code": str(calibration["security_code"]),

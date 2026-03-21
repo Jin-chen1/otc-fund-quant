@@ -471,6 +471,51 @@ def test_bond_estimator_non_strict_falls_back_to_live_fetch():
     assert result["estimated_nav"] > 0
 
 
+def test_bond_estimator_strict_accepts_latest_published_snapshot_for_same_day_estimate():
+    estimator = BondEstimator()
+    context = BatchContext(data_as_of_date="2026-03-19")
+
+    with patch.object(estimator.bond_fetcher, "get_bond_index_snapshot", return_value={
+        "change_pct": 0.043,
+        "prev_date": "2026-03-17",
+        "curr_date": "2026-03-18",
+    }):
+        result = estimator.estimate(
+            fund_code="010430",
+            last_nav=1.0362,
+            nav_date="2026-03-18",
+            target_date="2026-03-19",
+            fund_type="pure",
+            strict=True,
+            batch_context=context,
+        )
+
+    assert result["estimated_nav"] > 0
+    assert result["bond_return_source"] == "bond_index_snapshot"
+    assert not any("债券指数数据滞后" in item for item in result["warnings"])
+
+
+def test_bond_estimator_strict_rejects_truly_stale_snapshot():
+    estimator = BondEstimator()
+    context = BatchContext(data_as_of_date="2026-03-20")
+
+    with patch.object(estimator.bond_fetcher, "get_bond_index_snapshot", return_value={
+        "change_pct": 0.043,
+        "prev_date": "2026-03-17",
+        "curr_date": "2026-03-18",
+    }):
+        with pytest.raises(ValueError, match="债券指数数据滞后"):
+            estimator.estimate(
+                fund_code="010430",
+                last_nav=1.0362,
+                nav_date="2026-03-18",
+                target_date="2026-03-20",
+                fund_type="pure",
+                strict=True,
+                batch_context=context,
+            )
+
+
 def test_non_retryable_stock_position_error_short_circuits():
     state = {"count": 0}
 
@@ -565,6 +610,44 @@ def test_fund_stock_position_snapshot_reads_pingzhongdata_asset_allocation():
     assert snapshot["report_date"] == "2025-12-31"
     assert snapshot["raw_report_period"] == "2025-12-31"
     assert snapshot["snapshot_source"] == "pingzhongdata_asset_allocation"
+
+
+def test_bond_fetcher_snapshot_supports_cbond_date_value_payload():
+    class _Provider(HistoricalDataProvider):
+        def get_bond_index_history(self):
+            return pd.DataFrame(
+                {
+                    "date": ["2026-03-17", "2026-03-18"],
+                    "value": [101.0, 101.202],
+                }
+            )
+
+    fetcher = BondFetcher(historical_provider=_Provider())
+
+    snapshot = fetcher.get_bond_index_snapshot("comprehensive")
+
+    assert snapshot["index_name"] == "中债综合全价指数"
+    assert snapshot["prev_date"] == "2026-03-17"
+    assert snapshot["curr_date"] == "2026-03-18"
+    assert snapshot["change_pct"] == pytest.approx(0.2, abs=1e-6)
+
+
+def test_bond_fetcher_non_comprehensive_falls_back_when_only_cbond_available():
+    class _Provider(HistoricalDataProvider):
+        def get_bond_index_history(self):
+            return pd.DataFrame(
+                {
+                    "date": ["2026-03-17", "2026-03-18", "2026-03-19"],
+                    "value": [100.0, 100.1, 100.3],
+                }
+            )
+
+    fetcher = BondFetcher(historical_provider=_Provider())
+
+    series = fetcher.get_bond_index_return_series("credit", lookback_days=2)
+
+    assert len(series) == 2
+    assert series["bond_return"].iloc[-1] == pytest.approx(((100.3 / 100.1) - 1) * 100, abs=1e-6)
 
 
 def test_estimated_stock_position_series_latest_reads_pingzhongdata_series():
@@ -1301,6 +1384,30 @@ def test_resolve_index_tracking_target_uses_linked_etf_calibration_for_feeder_fu
             "benchmark": "创业板人工智能指数收益率×95%+银行活期存款利率(税后)×5%",
         }
     )
+    hk_tech_target = fetcher.resolve_index_tracking_target(
+        {
+            "code": "015740",
+            "name": "国泰中证港股通科技交易型开放式指数证券投资基金发起式联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "中证港股通科技指数（经估值汇率调整）收益率*95%+银行活期存款利率（税后）*5%",
+        }
+    )
+    battery_target = fetcher.resolve_index_tracking_target(
+        {
+            "code": "021034",
+            "name": "易方达国证新能源电池交易型开放式指数证券投资基金发起式联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "国证新能源电池指数收益率×95%+活期存款利率（税后）×5%",
+        }
+    )
+    gold_target = fetcher.resolve_index_tracking_target(
+        {
+            "code": "021363",
+            "name": "易方达中证沪深港黄金产业股票指数发起式证券投资基金",
+            "type": "股票型-标准指数",
+            "benchmark": "中证沪深港黄金产业股票指数收益率×95%+活期存款利率（税后）×5%",
+        }
+    )
     vanilla_target = fetcher.resolve_index_tracking_target(
         {
             "code": "018291",
@@ -1357,6 +1464,24 @@ def test_resolve_index_tracking_target_uses_linked_etf_calibration_for_feeder_fu
         "security_code": "159246",
         "market": "A股",
         "tracking_name": "创业板人工智能ETF富国",
+    }
+    assert hk_tech_target == {
+        "target_type": "linked_etf_a_share",
+        "security_code": "513020",
+        "market": "A股",
+        "tracking_name": "国泰中证港股通科技ETF",
+    }
+    assert battery_target == {
+        "target_type": "linked_etf_a_share",
+        "security_code": "159566",
+        "market": "A股",
+        "tracking_name": "易方达国证新能源电池ETF",
+    }
+    assert gold_target == {
+        "target_type": "linked_etf_a_share",
+        "security_code": "159562",
+        "market": "A股",
+        "tracking_name": "华夏中证沪深港黄金产业股票ETF",
     }
     assert vanilla_target["target_type"] == "a_index"
     assert vanilla_target["code"] == "000906"

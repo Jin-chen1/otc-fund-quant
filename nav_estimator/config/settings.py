@@ -156,6 +156,30 @@ A_SHARE_PROXY_TARGET_CALIBRATIONS = [
         "market": "A股",
         "aliases": ["中证全指半导体产品与设备", "中证全指半导体产品与设备指数"],
     },
+    {
+        "canonical_name": "中证港股通科技",
+        "target_type": "a_share_etf_proxy",
+        "security_code": "513020",
+        "tracking_name": "国泰中证港股通科技ETF",
+        "market": "A股",
+        "aliases": ["中证港股通科技", "中证港股通科技指数"],
+    },
+    {
+        "canonical_name": "国证新能源电池",
+        "target_type": "a_share_etf_proxy",
+        "security_code": "159566",
+        "tracking_name": "易方达国证新能源电池ETF",
+        "market": "A股",
+        "aliases": ["国证新能源电池", "国证新能源电池指数"],
+    },
+    {
+        "canonical_name": "中证沪深港黄金产业股票",
+        "target_type": "a_share_etf_proxy",
+        "security_code": "159562",
+        "tracking_name": "华夏中证沪深港黄金产业股票ETF",
+        "market": "A股",
+        "aliases": ["中证沪深港黄金产业股票", "中证沪深港黄金产业股票指数"],
+    },
 ]
 
 TRACKING_TARGET_CALIBRATIONS = {
@@ -206,6 +230,25 @@ TRACKING_TARGET_CALIBRATIONS = {
         "security_code": "159246",
         "tracking_name": "创业板人工智能ETF富国",
         "market": "A股",
+    },
+    "015740": {
+        "target_type": "linked_etf_a_share",
+        "security_code": "513020",
+        "tracking_name": "国泰中证港股通科技ETF",
+        "market": "A股",
+    },
+    "021034": {
+        "target_type": "linked_etf_a_share",
+        "security_code": "159566",
+        "tracking_name": "易方达国证新能源电池ETF",
+        "market": "A股",
+    },
+    "021363": {
+        "target_type": "linked_etf_a_share",
+        "security_code": "159562",
+        "tracking_name": "华夏中证沪深港黄金产业股票ETF",
+        "market": "A股",
+        "allow_non_linked": True,
     },
 }
 

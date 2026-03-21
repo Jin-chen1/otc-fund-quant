@@ -182,7 +182,9 @@ class BondEstimator(BaseEstimator):
 
         nav_date_resolved, target_date_resolved, fee_days = self.resolve_fee_days(nav_date, target_date)
         data_as_of_date = batch_context.data_as_of_date if batch_context is not None else date.today().isoformat()
+        nav_dt = self.normalize_date(nav_date_resolved, "nav_date")
         target_dt = self.normalize_date(target_date_resolved, "target_date")
+        data_as_of_dt = self.normalize_date(data_as_of_date, "data_as_of_date")
 
         if equity_index_code is None:
             equity_index_code = PROXY_INDEX_MAP["沪深300"]
@@ -212,13 +214,20 @@ class BondEstimator(BaseEstimator):
         if bond_curr_date is not None:
             bond_curr_dt = self.normalize_date(bond_curr_date, "bond_curr_date")
             if bond_curr_dt < target_dt and not (batch_context is not None and batch_context.is_historical):
+                is_same_day_estimate = target_dt == data_as_of_dt
+                latest_published_snapshot_is_valid = is_same_day_estimate and bond_curr_dt == nav_dt
                 stale_msg = f"债券指数数据滞后: curr_date={bond_curr_date}, target_date={target_date_resolved}"
-                if strict:
+                if strict and latest_published_snapshot_is_valid:
+                    logger.info(
+                        f"债券指数快照沿用最新已发布交易日: curr_date={bond_curr_date}, nav_date={nav_date_resolved}, target_date={target_date_resolved}"
+                    )
+                elif strict:
                     raise ValueError(stale_msg)
-                warnings.append(stale_msg)
-                logger.warning(stale_msg)
-                bond_return, bond_stale_fallback = self._build_stale_fallback_bond_return(warnings)
-                bond_return_source = "stale_fallback_accrual_rate_proxy"
+                else:
+                    warnings.append(stale_msg)
+                    logger.warning(stale_msg)
+                    bond_return, bond_stale_fallback = self._build_stale_fallback_bond_return(warnings)
+                    bond_return_source = "stale_fallback_accrual_rate_proxy"
 
         fee_drag = self.daily_fee_drag(mgmt_rate, custody_rate, nav_date=nav_date_resolved, target_date=target_date_resolved)
 
