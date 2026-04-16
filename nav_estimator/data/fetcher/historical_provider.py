@@ -91,7 +91,9 @@ class AkshareHistoricalDataProvider(HistoricalDataProvider):
         return ak.currency_boc_safe()
 
     def get_fund_nav_history(self, symbol: str) -> pd.DataFrame:
-        return ak.fund_open_fund_info_em(symbol=symbol, indicator="单位净值走势")
+        from .fund_fetcher import FundFetcher
+
+        return FundFetcher.get_pingzhongdata_nav_history_df(symbol)
 
     def get_fund_report_announcements(self, symbol: str) -> pd.DataFrame:
         return ak.fund_announcement_report_em(symbol=symbol)

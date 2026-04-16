@@ -2,6 +2,7 @@ import os
 import sys
 import http.client
 import sqlite3
+import threading
 from concurrent.futures import Future
 from datetime import timedelta
 from types import SimpleNamespace
@@ -24,10 +25,14 @@ from otc_fund_quant.nav_estimator.core.quality_gate import QualityGateError
 from otc_fund_quant.nav_estimator.core.nav_engine import NAVEngine
 from otc_fund_quant.config import loader as strategy_loader
 from otc_fund_quant.config.loader import ResolvedStrategyContext
+from otc_fund_quant.data.loader import DataLoader
 from otc_fund_quant.nav_estimator.config.settings import CACHE_DIR
 from otc_fund_quant.nav_estimator.data.fetcher.base_fetcher import BaseFetcher
+from otc_fund_quant.nav_estimator.data.fetcher.bond_fetcher import BondFetcher
 from otc_fund_quant.nav_estimator.data.fetcher.fund_fetcher import FundFetcher
+from otc_fund_quant.nav_estimator.data.fetcher.historical_provider import AkshareHistoricalDataProvider, HistoricalDataProvider
 from otc_fund_quant.nav_estimator.estimator.active_equity_estimator import ActiveEquityEstimator
+from otc_fund_quant.nav_estimator.estimator.base_estimator import BaseEstimator
 from otc_fund_quant.nav_estimator.estimator.bond_estimator import BondEstimator
 from otc_fund_quant.nav_estimator.estimator.index_estimator import IndexEstimator
 from otc_fund_quant.nav_estimator.estimator.qdii_hk_estimator import QDIIHKEstimator
@@ -97,6 +102,44 @@ def _active_holdings():
     )
 
 
+def _small_weight_holdings():
+    return pd.DataFrame(
+        [
+            {"code": "600000", "name": "A", "weight": 10.16, "market": "A股"},
+            {"code": "06618", "name": "京东健康", "weight": 0.78, "market": "港股"},
+        ]
+    )
+
+
+def _raw_em_holdings_df(report_period: str = "2025年4季度股票投资明细"):
+    return pd.DataFrame(
+        [
+            {
+                "序号": 1,
+                "股票代码": "600000",
+                "股票名称": "浦发银行",
+                "占净值比例": 9.64,
+                "持股数": 44.0,
+                "持仓市值": 1871.87,
+                "季度": report_period,
+            },
+            {
+                "序号": 2,
+                "股票代码": "00981",
+                "股票名称": "中芯国际",
+                "占净值比例": 4.57,
+                "持股数": 25.23,
+                "持仓市值": 888.25,
+                "季度": report_period,
+            },
+        ]
+    )
+
+
+def _fetcher_cache_key(func, fetcher, *args, **kwargs):
+    return BaseFetcher._build_cache_key(func, (fetcher, *args), kwargs)
+
+
 def _active_batch_context_with_errors():
     context = BatchContext(data_as_of_date="2026-03-08")
     context.a_prices_error = "proxy failed"
@@ -133,6 +176,17 @@ def test_retry_on_error_disables_trust_env_after_proxy_failure(monkeypatch):
     assert flaky() == "ok"
     assert session_states == [True, False]
     assert requests.sessions.Session.__init__ is original_init
+
+
+def test_validate_holding_weight_percentage_accepts_small_weights():
+    assert BaseEstimator.validate_holding_weight_percentage(0.78, "持仓权重") == 0.78
+    assert BaseEstimator.validate_holding_weight_percentage("0.82", "持仓权重") == 0.82
+    assert BaseEstimator.validate_holding_weight_percentage(0.0, "持仓权重") == 0.0
+
+
+def test_validate_percentage_still_rejects_ratio_like_total_position():
+    with pytest.raises(ValueError, match="疑似传入比例值"):
+        BaseEstimator.validate_percentage(0.78, "主动偏股基金总股票仓位")
 
 
 def test_retry_on_error_direct_mode_disables_trust_env_immediately(monkeypatch):
@@ -610,6 +664,187 @@ def test_fund_stock_position_snapshot_reads_pingzhongdata_asset_allocation():
     assert snapshot["report_date"] == "2025-12-31"
     assert snapshot["raw_report_period"] == "2025-12-31"
     assert snapshot["snapshot_source"] == "pingzhongdata_asset_allocation"
+
+
+def test_pingzhongdata_nav_history_parses_unit_and_accumulated_series():
+    js_text = (
+        'var Data_netWorthTrend = [{"x":1710028800000,"y":1.01,"equityReturn":0.0},'
+        '{"x":1710115200000,"y":1.02,"equityReturn":0.99}];'
+        'var Data_ACWorthTrend = [[1710028800000,1.11],[1710115200000,1.12]];'
+    )
+
+    with patch.object(FundFetcher, "_get_pingzhongdata_text", return_value=js_text):
+        history_df = FundFetcher.get_pingzhongdata_nav_history_df("900010")
+
+    assert list(history_df.columns) == ["净值日期", "单位净值", "日增长率", "累计净值"]
+    assert history_df["净值日期"].tolist() == [pd.Timestamp("2024-03-10"), pd.Timestamp("2024-03-11")]
+    assert history_df["单位净值"].tolist() == [1.01, 1.02]
+    assert history_df["日增长率"].tolist() == [0.0, 0.99]
+    assert history_df["累计净值"].tolist() == [1.11, 1.12]
+
+
+def test_pingzhongdata_nav_history_fills_missing_accumulated_values_from_unit_nav():
+    js_text = (
+        'var Data_netWorthTrend = [{"x":1710028800000,"y":1.01,"equityReturn":0.0},'
+        '{"x":1710115200000,"y":1.02,"equityReturn":0.99}];'
+        'var Data_ACWorthTrend = [[1710028800000,1.11]];'
+    )
+
+    with patch.object(FundFetcher, "_get_pingzhongdata_text", return_value=js_text):
+        history_df = FundFetcher.get_pingzhongdata_nav_history_df("900011")
+
+    assert history_df["累计净值"].tolist() == [1.11, 1.02]
+
+
+def test_pingzhongdata_nav_history_sorts_and_deduplicates_by_date():
+    js_text = (
+        'var Data_netWorthTrend = [{"x":1710115200000,"y":1.02,"equityReturn":0.2},'
+        '{"x":1710028800000,"y":1.01,"equityReturn":0.1},'
+        '{"x":1710115200000,"y":1.03,"equityReturn":0.3}];'
+        'var Data_ACWorthTrend = [[1710115200000,1.12],[1710028800000,1.11],[1710115200000,1.13]];'
+    )
+
+    with patch.object(FundFetcher, "_get_pingzhongdata_text", return_value=js_text):
+        history_df = FundFetcher.get_pingzhongdata_nav_history_df("900012")
+
+    assert history_df["净值日期"].tolist() == [pd.Timestamp("2024-03-10"), pd.Timestamp("2024-03-11")]
+    assert history_df["单位净值"].tolist() == [1.01, 1.03]
+    assert history_df["累计净值"].tolist() == [1.11, 1.13]
+
+
+@pytest.mark.parametrize(
+    ("js_text", "expected_message"),
+    [
+        ('var Data_ACWorthTrend = [[1710028800000,1.11]];', "Data_netWorthTrend"),
+        ('var Data_netWorthTrend = {}; var Data_ACWorthTrend = [[1710028800000,1.11]];', "Data_netWorthTrend 结构异常"),
+        ('var Data_netWorthTrend = []; var Data_ACWorthTrend = [];', "Data_netWorthTrend 为空"),
+    ],
+)
+def test_pingzhongdata_nav_history_rejects_invalid_net_worth_payload(js_text, expected_message):
+    with patch.object(FundFetcher, "_get_pingzhongdata_text", return_value=js_text):
+        with pytest.raises(ValueError, match=expected_message):
+            FundFetcher.get_pingzhongdata_nav_history_df("900013")
+
+
+def test_data_loader_fetch_nav_reuses_pingzhongdata_history(tmp_path):
+    loader = DataLoader(db_path=str(tmp_path / "nav.sqlite"))
+    history_df = pd.DataFrame(
+        {
+            "净值日期": [pd.Timestamp("2026-03-05"), pd.Timestamp("2026-03-06")],
+            "单位净值": [1.01, 1.02],
+            "日增长率": [0.0, 0.99],
+            "累计净值": [1.01, 1.03],
+        }
+    )
+
+    with patch(
+        "otc_fund_quant.nav_estimator.data.fetcher.fund_fetcher.FundFetcher.get_pingzhongdata_nav_history_df",
+        return_value=history_df,
+    ) as mock_history:
+        result = loader.fetch_nav("000001", "20260306", "20260306")
+
+    mock_history.assert_called_once_with("000001")
+    assert result.to_dict(orient="records") == [
+        {"date": "2026-03-06", "fund_code": "000001", "nav": 1.02, "acc_nav": 1.03}
+    ]
+
+
+def test_historical_provider_concurrent_pingzhongdata_reads_avoid_akshare():
+    provider = AkshareHistoricalDataProvider()
+    js_text = (
+        'var Data_netWorthTrend = [{"x":1710028800000,"y":1.01,"equityReturn":0.0},'
+        '{"x":1710115200000,"y":1.02,"equityReturn":0.99}];'
+        'var Data_ACWorthTrend = [[1710028800000,1.11],[1710115200000,1.12]];'
+    )
+    results = []
+    errors = []
+
+    def worker():
+        try:
+            history_df = provider.get_fund_nav_history("900014")
+            results.append(history_df["累计净值"].tolist())
+        except Exception as exc:
+            errors.append(exc)
+
+    with patch.object(FundFetcher, "_get_pingzhongdata_text", return_value=js_text), patch(
+        "otc_fund_quant.nav_estimator.data.fetcher.historical_provider.ak.fund_open_fund_info_em",
+        side_effect=AssertionError("should not use akshare"),
+    ):
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    assert errors == []
+    assert results == [[1.11, 1.12], [1.11, 1.12]]
+
+
+def test_portfolio_holdings_history_refreshes_cached_empty_dataframe():
+    fetcher = FundFetcher()
+    cache_key = _fetcher_cache_key(
+        FundFetcher.get_portfolio_holdings_history,
+        fetcher,
+        "016874",
+        years=[2026, 2025],
+    )
+    BaseFetcher.cache.delete(cache_key)
+    BaseFetcher.cache.set(cache_key, pd.DataFrame(), ttl=86400)
+
+    def portfolio_side_effect(symbol, date):
+        return _raw_em_holdings_df() if symbol == "016874" and str(date) == "2025" else pd.DataFrame()
+
+    try:
+        with patch("otc_fund_quant.nav_estimator.data.fetcher.fund_fetcher.ak.fund_portfolio_hold_em", side_effect=portfolio_side_effect):
+            holdings_df = fetcher.get_portfolio_holdings_history("016874", years=[2026, 2025])
+
+        assert not holdings_df.empty
+        assert str(holdings_df["report_date"].dropna().max().date()) == "2025-12-31"
+        cached = BaseFetcher.cache.get(cache_key)
+        assert isinstance(cached, pd.DataFrame)
+        assert not cached.empty
+    finally:
+        BaseFetcher.cache.delete(cache_key)
+
+
+def test_portfolio_holdings_refreshes_cached_empty_dataframe():
+    fetcher = FundFetcher()
+    cache_key = _fetcher_cache_key(FundFetcher.get_portfolio_holdings, fetcher, "016874", None)
+    BaseFetcher.cache.delete(cache_key)
+    BaseFetcher.cache.set(cache_key, pd.DataFrame(), ttl=86400)
+    normalized_holdings = FundFetcher._normalize_holdings_df(_raw_em_holdings_df())
+
+    try:
+        with patch.object(fetcher, "get_portfolio_holdings_history", return_value=normalized_holdings):
+            holdings_df = fetcher.get_portfolio_holdings("016874", None)
+
+        assert not holdings_df.empty
+        assert str(holdings_df["report_date"].dropna().max().date()) == "2025-12-31"
+        cached = BaseFetcher.cache.get(cache_key)
+        assert isinstance(cached, pd.DataFrame)
+        assert not cached.empty
+    finally:
+        BaseFetcher.cache.delete(cache_key)
+
+
+def test_portfolio_holdings_history_does_not_cache_empty_dataframe():
+    fetcher = FundFetcher()
+    cache_key = _fetcher_cache_key(
+        FundFetcher.get_portfolio_holdings_history,
+        fetcher,
+        "016874",
+        years=[2026, 2025],
+    )
+    BaseFetcher.cache.delete(cache_key)
+
+    try:
+        with patch("otc_fund_quant.nav_estimator.data.fetcher.fund_fetcher.ak.fund_portfolio_hold_em", return_value=pd.DataFrame()):
+            holdings_df = fetcher.get_portfolio_holdings_history("016874", years=[2026, 2025])
+
+        assert holdings_df.empty
+        assert BaseFetcher.cache.get(cache_key) is None
+    finally:
+        BaseFetcher.cache.delete(cache_key)
 
 
 def test_bond_fetcher_snapshot_supports_cbond_date_value_payload():
@@ -1132,6 +1367,49 @@ def test_nav_engine_rejects_unsupported_qdii_profile():
         )
 
 
+def test_fund_classifier_treats_non_qdii_linked_etf_as_index_a():
+    classifier = FundClassifier()
+
+    assert classifier.classify(
+        "002963",
+        fund_info={
+            "code": "002963",
+            "name": "易方达黄金交易型开放式证券投资基金联接基金",
+            "type": "商品型-非QDII",
+            "benchmark": "上海黄金交易所Au99.99现货实盘合约收盘价计算的收益率×95%＋活期存款利率（税后）×5%",
+            "investment_strategy": "本基金为易方达黄金ETF的联接基金。",
+            "investment_target": "本基金主要通过投资于易方达黄金ETF追踪业绩比较基准的表现。",
+        },
+    ) == "index_a"
+
+    assert classifier.classify(
+        "020989",
+        fund_info={
+            "code": "020989",
+            "name": "南方恒生科技交易型开放式指数证券投资基金发起式联接基金（QDII）",
+            "type": "QDII-股票",
+            "benchmark": "经汇率调整后的恒生科技指数收益率×95%+银行人民币活期存款利率（税后）×5%",
+            "investment_strategy": "",
+            "investment_target": "",
+        },
+    ) == "qdii"
+
+
+def test_nav_engine_classifies_unsupported_failure_reason_separately():
+    from otc_fund_quant.nav_estimator.core.nav_engine import NAVEngine
+
+    assert NAVEngine._classify_failure_reason(
+        "基金 002963 当前版本不支持估值",
+        unsupported_reason="基金 002963 当前版本不支持估值",
+    ) == "当前版本不支持"
+
+
+def test_nav_engine_classifies_missing_holdings_failure_separately():
+    from otc_fund_quant.nav_estimator.core.nav_engine import NAVEngine
+
+    assert NAVEngine._classify_failure_reason("未获取到基金 016874 的持仓数据") == "持仓数据缺失"
+
+
 def test_active_equity_non_strict_never_calls_full_market_fallback():
     estimator = ActiveEquityEstimator()
     holdings_df = _active_holdings()
@@ -1186,6 +1464,65 @@ def test_qdii_non_strict_never_calls_full_market_fallback():
 
     assert result["estimated_nav"] > 0
     assert set(result["missing_quotes"]) == {"00700", "00941"}
+
+
+def test_qdii_active_strict_accepts_small_holding_weights():
+    estimator = QDIIHKEstimator()
+    holdings_df = _small_weight_holdings()
+
+    with patch.object(estimator.fund_fetcher, "get_fund_stock_position_snapshot", return_value={
+        "position": 85.0,
+        "report_date": "2025-12-31",
+        "raw_report_period": "2025-12-31",
+        "snapshot_source": "pingzhongdata_asset_allocation",
+    }), \
+         patch.object(estimator.fund_fetcher, "extract_holdings_report_metadata", return_value=("2025Q4", "2025-12-31")), \
+         patch.object(estimator.stock_fetcher, "_get_a_share_quotes_live_by_codes_partial", return_value=({
+             "600000": {
+                 "value": 1.0,
+                 "source": "eastmoney_single_quote",
+                 "source_disagreements": [],
+                 "data_as_of_date": "2026-04-07",
+                 "raw": {"change_pct": 1.0},
+             }
+         }, [])), \
+         patch.object(estimator.stock_fetcher, "_get_hk_share_quotes_live_by_codes_partial", return_value=({
+             "06618": {
+                 "value": -0.5,
+                 "source": "sina_single_quote",
+                 "source_disagreements": [],
+                 "data_as_of_date": "2026-04-07",
+                 "raw": {"change_pct": -0.5},
+             }
+         }, [])), \
+         patch.object(estimator.fx_fetcher, "get_hkd_cny_daily_change_live", return_value={
+             "value": 0.1,
+             "source": "safe_mid_rate",
+             "source_disagreements": [],
+             "data_as_of_date": "2026-04-07",
+             "raw": {"change_pct": 0.1},
+         }), \
+         patch.object(estimator.index_fetcher, "get_hk_index_return_live", return_value={
+             "value": -1.2,
+             "source": "sina_index_single_quote",
+             "source_disagreements": [],
+             "data_as_of_date": "2026-04-07",
+             "raw": {"change_pct": -1.2},
+         }):
+        result = estimator.estimate(
+            fund_code="020989",
+            last_nav=1.2138,
+            nav_date="2026-04-03",
+            target_date="2026-04-07",
+            is_index_fund=False,
+            market_profile="hk",
+            holdings=holdings_df,
+            proxy_components=[{"code": "HSI", "name": "恒生指数", "market": "港股", "weight": 1.0}],
+            strict=True,
+        )
+
+    assert result["estimated_nav"] > 0
+    assert any(item["code"] == "06618" and item["weight"] == 0.78 for item in result["holdings_details"])
 
 
 def test_lookup_a_index_code_by_name_matches_normalized_name():
@@ -1320,6 +1657,16 @@ def test_resolve_hk_index_code_uses_benchmark_only():
 def test_resolve_index_tracking_target_uses_linked_etf_calibration_for_feeder_funds():
     fetcher = FundFetcher()
 
+    commodity_gold_target = fetcher.resolve_index_tracking_target(
+        {
+            "code": "002963",
+            "name": "易方达黄金交易型开放式证券投资基金联接基金",
+            "type": "商品型-非QDII",
+            "benchmark": "上海黄金交易所Au99.99现货实盘合约收盘价计算的收益率×95%＋活期存款利率（税后）×5%",
+            "investment_strategy": "本基金为易方达黄金ETF的联接基金。",
+            "investment_target": "本基金主要通过投资于易方达黄金ETF追踪业绩比较基准的表现。",
+        }
+    )
     ai_linked_a_target = fetcher.resolve_index_tracking_target(
         {
             "code": "012733",
@@ -1392,6 +1739,14 @@ def test_resolve_index_tracking_target_uses_linked_etf_calibration_for_feeder_fu
             "benchmark": "中证港股通科技指数（经估值汇率调整）收益率*95%+银行活期存款利率（税后）*5%",
         }
     )
+    industrial_metals_target = fetcher.resolve_index_tracking_target(
+        {
+            "code": "017193",
+            "name": "天弘中证工业有色金属主题交易型开放式指数证券投资基金发起式联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "中证工业有色金属主题指数收益率×95%+银行活期存款利率（税后）×5%",
+        }
+    )
     battery_target = fetcher.resolve_index_tracking_target(
         {
             "code": "021034",
@@ -1408,6 +1763,14 @@ def test_resolve_index_tracking_target_uses_linked_etf_calibration_for_feeder_fu
             "benchmark": "中证沪深港黄金产业股票指数收益率×95%+活期存款利率（税后）×5%",
         }
     )
+    a500_target = fetcher.resolve_index_tracking_target(
+        {
+            "code": "022464",
+            "name": "富国中证A500交易型开放式指数证券投资基金发起式联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "中证A500指数收益率×95%+银行活期存款利率(税后)×5%",
+        }
+    )
     vanilla_target = fetcher.resolve_index_tracking_target(
         {
             "code": "018291",
@@ -1417,6 +1780,12 @@ def test_resolve_index_tracking_target_uses_linked_etf_calibration_for_feeder_fu
         }
     )
 
+    assert commodity_gold_target == {
+        "target_type": "linked_etf_a_share",
+        "security_code": "159934",
+        "market": "A股",
+        "tracking_name": "易方达黄金ETF",
+    }
     assert ai_linked_a_target == {
         "target_type": "linked_etf_a_share",
         "security_code": "159819",
@@ -1471,6 +1840,12 @@ def test_resolve_index_tracking_target_uses_linked_etf_calibration_for_feeder_fu
         "market": "A股",
         "tracking_name": "国泰中证港股通科技ETF",
     }
+    assert industrial_metals_target == {
+        "target_type": "linked_etf_a_share",
+        "security_code": "159157",
+        "market": "A股",
+        "tracking_name": "天弘中证工业有色金属主题ETF",
+    }
     assert battery_target == {
         "target_type": "linked_etf_a_share",
         "security_code": "159566",
@@ -1482,6 +1857,12 @@ def test_resolve_index_tracking_target_uses_linked_etf_calibration_for_feeder_fu
         "security_code": "159562",
         "market": "A股",
         "tracking_name": "华夏中证沪深港黄金产业股票ETF",
+    }
+    assert a500_target == {
+        "target_type": "linked_etf_a_share",
+        "security_code": "563220",
+        "market": "A股",
+        "tracking_name": "富国中证A500ETF",
     }
     assert vanilla_target["target_type"] == "a_index"
     assert vanilla_target["code"] == "000906"
@@ -1682,6 +2063,67 @@ def test_active_equity_estimator_strict_supports_ai_theme_a_share_etf_proxy_comp
     assert result["used_sources"]["proxy_tracking_targets"]["159819"] == "eastmoney_single_quote"
 
 
+def test_active_equity_estimator_strict_accepts_small_holding_weights():
+    estimator = ActiveEquityEstimator()
+    holdings_df = _small_weight_holdings()
+    proxy_components = [
+        {"code": "159819", "quote_code": "159819", "name": "人工智能ETF", "market": "A股", "weight": 1.0, "target_type": "a_share_etf_proxy"},
+    ]
+
+    with patch.object(estimator.fund_fetcher, "get_fund_stock_position_snapshot", return_value={
+        "position": 80.0,
+        "report_date": "2025-12-31",
+        "raw_report_period": "2025-12-31",
+        "snapshot_source": "pingzhongdata_asset_allocation",
+    }), \
+         patch.object(estimator.fund_fetcher, "extract_holdings_report_metadata", return_value=("2025Q4", "2025-12-31")), \
+         patch.object(estimator.stock_fetcher, "_get_a_share_quotes_live_by_codes_partial", return_value=({
+             "600000": {
+                 "value": 1.0,
+                 "source": "eastmoney_single_quote",
+                 "source_disagreements": [],
+                 "data_as_of_date": "2026-04-07",
+                 "raw": {"change_pct": 1.0},
+             }
+         }, [])), \
+         patch.object(estimator.stock_fetcher, "_get_hk_share_quotes_live_by_codes_partial", return_value=({
+             "06618": {
+                 "value": -0.5,
+                 "source": "sina_single_quote",
+                 "source_disagreements": [],
+                 "data_as_of_date": "2026-04-07",
+                 "raw": {"change_pct": -0.5},
+             }
+         }, [])), \
+         patch.object(estimator.stock_fetcher, "get_a_share_quote_live", return_value={
+             "value": -1.55,
+             "source": "eastmoney_single_quote",
+             "source_disagreements": [],
+             "data_as_of_date": "2026-04-07",
+             "raw": {"change_pct": -1.55},
+         }), \
+         patch.object(estimator.fx_fetcher, "get_hkd_cny_daily_change_live", return_value={
+             "value": 0.1,
+             "source": "safe_mid_rate",
+             "source_disagreements": [],
+             "data_as_of_date": "2026-04-07",
+             "raw": {"change_pct": 0.1},
+         }), \
+         patch.object(estimator.index_fetcher, "get_a_index_return_live", side_effect=AssertionError("should not use a-index fetcher for ETF proxy")):
+        result = estimator.estimate(
+            fund_code="015916",
+            last_nav=1.7198,
+            nav_date="2026-04-03",
+            target_date="2026-04-07",
+            holdings=holdings_df,
+            proxy_components=proxy_components,
+            strict=True,
+        )
+
+    assert result["estimated_nav"] > 0
+    assert any(item["code"] == "06618" and item["weight"] == 0.78 for item in result["holdings_details"])
+
+
 def test_nav_engine_strict_run_supports_active_ai_theme_proxy_benchmark():
     engine = NAVEngine(strict=True)
     holdings_df = pd.DataFrame([{"code": "600000", "name": "A", "weight": 10.0, "market": "A股"}])
@@ -1875,6 +2317,37 @@ def test_resolve_active_proxy_components_supports_single_equity_index_with_cash_
     assert components[0]["weight"] == 1.0
 
 
+def test_extract_benchmark_equity_index_components_skips_full_bond_dynamic_candidates():
+    fetcher = FundFetcher()
+
+    with patch.object(fetcher, "_lookup_a_index_code_by_name", side_effect=AssertionError("should not lookup non-equity benchmark")):
+        components, unresolved_components = fetcher.extract_benchmark_equity_index_components(
+            "沪深300指数收益率×70%＋中证全债指数收益率×30%",
+            allowed_markets={"A股"},
+            return_unresolved=True,
+        )
+
+    assert [item["code"] for item in components] == ["000300"]
+    assert unresolved_components == []
+
+
+def test_resolve_active_proxy_components_ignores_full_bond_and_renormalizes_single_equity_index():
+    fetcher = FundFetcher()
+
+    with patch.object(fetcher, "_lookup_a_index_code_by_name", side_effect=AssertionError("should not lookup 中证全债指数 dynamically")):
+        components = fetcher.resolve_active_proxy_components(
+            {
+                "code": "001770",
+                "benchmark": "沪深300指数收益率×70%＋中证全债指数收益率×30%",
+            }
+        )
+
+    assert len(components) == 1
+    assert components[0]["code"] == "000300"
+    assert components[0]["market"] == "A股"
+    assert components[0]["weight"] == 1.0
+
+
 def test_resolve_active_proxy_components_rejects_non_equity_only_benchmark():
     fetcher = FundFetcher()
 
@@ -1885,6 +2358,57 @@ def test_resolve_active_proxy_components_rejects_non_equity_only_benchmark():
                 "benchmark": "中债-综合指数收益率×80%+银行活期存款利率（税后）×20%",
             }
         )
+
+
+def test_nav_engine_strict_run_skips_full_bond_benchmark_residue_for_active_fund():
+    engine = NAVEngine(strict=True)
+    holdings_df = pd.DataFrame([{"code": "600000", "name": "A", "weight": 10.0, "market": "A股"}])
+    fund_info = {
+        "code": "001770",
+        "name": "前海开源嘉鑫灵活配置混合型证券投资基金",
+        "type": "混合型-灵活配置",
+        "benchmark": "沪深300指数收益率×70%＋中证全债指数收益率×30%",
+        "management_fee": 0.015,
+        "custody_fee": 0.0025,
+    }
+
+    def estimate_success(**kwargs):
+        return {
+            "fund_code": kwargs["fund_code"],
+            "estimated_nav": 2.048,
+            "estimated_return": -0.58,
+            "nav_date": kwargs["nav_date"],
+            "warnings": [],
+        }
+
+    with patch.object(engine.fund_fetcher, "get_fund_info", return_value=fund_info), \
+         patch.object(engine.fund_fetcher, "get_previous_official_nav", return_value=(2.06, "2026-04-03")), \
+         patch.object(engine.fund_fetcher, "get_portfolio_holdings", return_value=holdings_df), \
+         patch.object(engine.fund_fetcher, "_lookup_a_index_code_by_name", side_effect=AssertionError("should not lookup 中证全债指数 dynamically")), \
+         patch.object(engine.classifier.fund_fetcher, "_lookup_a_index_code_by_name", side_effect=AssertionError("should not lookup 中证全债指数 dynamically")), \
+         patch("otc_fund_quant.nav_estimator.core.nav_engine.build_confidence_payload", return_value={}), \
+         patch.object(engine.equity_estimator, "estimate", side_effect=estimate_success) as mock_equity_estimate, \
+         patch.object(engine.index_estimator, "estimate", side_effect=AssertionError("should not use index estimator")), \
+         patch.object(engine.qdii_estimator, "estimate", side_effect=AssertionError("should not use qdii estimator")), \
+         patch.object(engine.bond_estimator, "estimate", side_effect=AssertionError("should not use bond estimator")):
+        results_df = engine.run(["001770"], strict=True)
+
+    result_map = {row["fund_code"]: row for row in results_df.to_dict(orient="records")}
+    assert result_map["001770"]["status"] == "成功"
+    assert "中证全债指数" not in str(result_map["001770"].get("error", ""))
+    mock_equity_estimate.assert_called_once()
+    call_kwargs = mock_equity_estimate.call_args.kwargs
+    assert call_kwargs["fund_code"] == "001770"
+    assert call_kwargs["proxy_components"] == [
+        {
+            "code": "000300",
+            "name": "沪深300",
+            "market": "A股",
+            "weight": 1.0,
+            "target_type": "a_index",
+            "quote_code": "000300",
+        }
+    ]
 
 
 def test_fund_classifier_prefers_a_share_index_when_hengsheng_a_share_present():
@@ -2413,6 +2937,322 @@ def test_nav_engine_strict_run_supports_current_eleven_fund_batch():
     assert any("failure_breakdown={}" in message for message in summary_messages)
 
 
+def test_nav_engine_strict_run_supports_current_seventeen_dca_fund_batch():
+    engine = NAVEngine(strict=True)
+    holdings_df = pd.DataFrame([{"code": "600000", "name": "A", "weight": 10.0, "market": "A股"}])
+    fund_info_map = {
+        "002963": {
+            "code": "002963",
+            "name": "易方达黄金交易型开放式证券投资基金联接基金",
+            "type": "商品型-非QDII",
+            "benchmark": "上海黄金交易所Au99.99现货实盘合约收盘价计算的收益率×95%＋活期存款利率（税后）×5%",
+            "management_fee": 0.005,
+            "custody_fee": 0.001,
+            "investment_strategy": "本基金为易方达黄金ETF的联接基金。",
+            "investment_target": "本基金主要通过投资于易方达黄金ETF追踪业绩比较基准的表现。",
+        },
+        "007467": {
+            "code": "007467",
+            "name": "华泰柏瑞中证红利低波动交易型开放式指数证券投资基金联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "中证红利低波动指数收益率×95%+银行活期存款利率(税后)×5%",
+            "management_fee": 0.005,
+            "custody_fee": 0.001,
+        },
+        "010430": {
+            "code": "010430",
+            "name": "招商安阳债券型证券投资基金",
+            "type": "债券型-普通债券",
+            "benchmark": "中债综合全价指数收益率×90%+银行活期存款利率(税后)×10%",
+            "management_fee": 0.006,
+            "custody_fee": 0.002,
+        },
+        "015740": {
+            "code": "015740",
+            "name": "国泰中证港股通科技交易型开放式指数证券投资基金发起式联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "中证港股通科技指数（经估值汇率调整）收益率*95%+银行活期存款利率（税后）*5%",
+            "management_fee": 0.005,
+            "custody_fee": 0.001,
+        },
+        "015916": {
+            "code": "015916",
+            "name": "永赢医药创新智选混合型发起式证券投资基金",
+            "type": "混合型-偏股",
+            "benchmark": "中证医药卫生指数收益率×70%+中证港股通综合指数收益率（人民币）×10%+中债-综合指数（全价）收益率×20%",
+            "management_fee": 0.015,
+            "custody_fee": 0.002,
+        },
+        "017193": {
+            "code": "017193",
+            "name": "天弘中证工业有色金属主题交易型开放式指数证券投资基金发起式联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "中证工业有色金属主题指数收益率×95%+银行活期存款利率（税后）×5%",
+            "management_fee": 0.005,
+            "custody_fee": 0.001,
+        },
+        "018291": {
+            "code": "018291",
+            "name": "广发新兴成长灵活配置混合型证券投资基金",
+            "type": "混合型-灵活配置",
+            "benchmark": "中证800指数收益率×65%+一年期人民币定期存款利率（税后）×35%",
+            "management_fee": 0.015,
+            "custody_fee": 0.002,
+        },
+        "018345": {
+            "code": "018345",
+            "name": "华夏中证机器人交易型开放式指数证券投资基金发起式联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "中证机器人指数收益率×95%＋人民币活期存款税后利率×5%",
+            "management_fee": 0.005,
+            "custody_fee": 0.001,
+        },
+        "020640": {
+            "code": "020640",
+            "name": "广发中证半导体材料设备主题交易型开放式指数证券投资基金发起式联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "中证半导体材料设备主题指数收益率×95%+人民币活期存款税后利率×5%",
+            "management_fee": 0.005,
+            "custody_fee": 0.001,
+        },
+        "020989": {
+            "code": "020989",
+            "name": "南方恒生科技交易型开放式指数证券投资基金发起式联接基金（QDII）",
+            "type": "QDII-股票",
+            "benchmark": "经汇率调整后的恒生科技指数收益率×95%+银行人民币活期存款利率（税后）×5%",
+            "management_fee": 0.015,
+            "custody_fee": 0.003,
+            "investment_strategy": "",
+            "investment_target": "",
+        },
+        "021034": {
+            "code": "021034",
+            "name": "易方达国证新能源电池交易型开放式指数证券投资基金发起式联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "国证新能源电池指数收益率×95%+活期存款利率（税后）×5%",
+            "management_fee": 0.005,
+            "custody_fee": 0.001,
+        },
+        "021363": {
+            "code": "021363",
+            "name": "易方达中证沪深港黄金产业股票指数发起式证券投资基金",
+            "type": "股票型-标准指数",
+            "benchmark": "中证沪深港黄金产业股票指数收益率×95%+活期存款利率（税后）×5%",
+            "management_fee": 0.005,
+            "custody_fee": 0.001,
+        },
+        "022464": {
+            "code": "022464",
+            "name": "富国中证A500交易型开放式指数证券投资基金发起式联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "中证A500指数收益率×95%+银行活期存款利率(税后)×5%",
+            "management_fee": 0.005,
+            "custody_fee": 0.001,
+        },
+        "023598": {
+            "code": "023598",
+            "name": "景顺长城中证港股通创新药交易型开放式指数证券投资基金发起式联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "中证港股通创新药指数收益率×95%+银行活期存款利率(税后)×5%",
+            "management_fee": 0.005,
+            "custody_fee": 0.001,
+        },
+        "023639": {
+            "code": "023639",
+            "name": "国泰恒生A股电网设备交易型开放式指数证券投资基金发起式联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "恒生A股电网设备指数收益率*95%+银行活期存款利率(税后)*5%",
+            "management_fee": 0.005,
+            "custody_fee": 0.001,
+        },
+        "024663": {
+            "code": "024663",
+            "name": "富国创业板人工智能交易型开放式指数证券投资基金发起式联接基金",
+            "type": "股票型-标准指数",
+            "benchmark": "创业板人工智能指数收益率×95%+银行活期存款利率(税后)×5%",
+            "management_fee": 0.005,
+            "custody_fee": 0.001,
+        },
+        "025209": {
+            "code": "025209",
+            "name": "永赢先锋半导体智选混合型发起式证券投资基金",
+            "type": "混合型-偏股",
+            "benchmark": "中证全指半导体产品与设备指数收益率×70%+恒生指数收益率×10%+中债-综合指数（全价）收益率×20%",
+            "management_fee": 0.015,
+            "custody_fee": 0.002,
+        },
+    }
+
+    def estimate_success(**kwargs):
+        return {
+            "fund_code": kwargs["fund_code"],
+            "estimated_nav": 1.01,
+            "estimated_return": 0.1,
+            "nav_date": kwargs["nav_date"],
+            "warnings": [],
+        }
+
+    def lookup_side_effect(index_name):
+        mapping = {
+            "中证医药卫生": {"code": "000933", "name": "中证医药卫生"},
+            "中证医药卫生指数": {"code": "000933", "name": "中证医药卫生"},
+            "中证港股通综合": {"code": "930930", "name": "中证港股通综合"},
+            "中证港股通综合指数": {"code": "930930", "name": "中证港股通综合"},
+            "中证A500": {"code": "000510", "name": "中证A500"},
+            "中证A500指数": {"code": "000510", "name": "中证A500"},
+            "中证800": {"code": "000906", "name": "中证800"},
+            "中证800指数": {"code": "000906", "name": "中证800"},
+        }
+        return mapping[index_name]
+
+    fund_codes = [
+        "002963",
+        "007467",
+        "010430",
+        "015740",
+        "015916",
+        "017193",
+        "018291",
+        "018345",
+        "020640",
+        "020989",
+        "021034",
+        "021363",
+        "022464",
+        "023598",
+        "023639",
+        "024663",
+        "025209",
+    ]
+
+    with patch("otc_fund_quant.nav_estimator.core.nav_engine.logger.info") as mock_logger_info, \
+         patch.object(engine.fund_fetcher, "get_fund_info", side_effect=lambda code: fund_info_map[code]), \
+         patch.object(engine.fund_fetcher, "get_previous_official_nav", return_value=(1.0, "2026-03-25")), \
+         patch.object(engine.fund_fetcher, "get_portfolio_holdings", return_value=holdings_df), \
+         patch.object(engine.fund_fetcher, "resolve_qdii_proxy_components", return_value=[{"code": "HSTECH", "market": "港股", "weight": 1.0}]), \
+         patch.object(engine.fund_fetcher, "is_index_fund", return_value=True), \
+         patch.object(engine, "_validate_supported_qdii_profile", return_value="hk"), \
+         patch.object(engine.fund_fetcher, "_lookup_a_index_code_by_name", side_effect=lookup_side_effect), \
+         patch.object(engine.classifier.fund_fetcher, "_lookup_a_index_code_by_name", side_effect=lookup_side_effect), \
+         patch("otc_fund_quant.nav_estimator.core.nav_engine.build_confidence_payload", return_value={}), \
+         patch.object(engine.equity_estimator, "estimate", side_effect=estimate_success) as mock_equity_estimate, \
+         patch.object(engine.index_estimator, "estimate", side_effect=estimate_success) as mock_index_estimate, \
+         patch.object(engine.qdii_estimator, "estimate", side_effect=estimate_success) as mock_qdii_estimate, \
+         patch.object(engine.bond_estimator, "estimate", side_effect=estimate_success) as mock_bond_estimate:
+        results_df = engine.run(fund_codes, strict=True)
+
+    assert list(results_df["fund_code"]) == fund_codes
+    assert set(results_df["status"]) == {"成功"}
+    assert {call.kwargs["fund_code"] for call in mock_equity_estimate.call_args_list} == {"015916", "018291", "025209"}
+    assert {call.kwargs["fund_code"] for call in mock_index_estimate.call_args_list} == {
+        "002963",
+        "007467",
+        "015740",
+        "017193",
+        "018345",
+        "020640",
+        "021034",
+        "021363",
+        "022464",
+        "023598",
+        "023639",
+        "024663",
+    }
+    assert {call.kwargs["fund_code"] for call in mock_qdii_estimate.call_args_list} == {"020989"}
+    assert {call.kwargs["fund_code"] for call in mock_bond_estimate.call_args_list} == {"010430"}
+    index_kwargs = {call.kwargs["fund_code"]: call.kwargs for call in mock_index_estimate.call_args_list}
+    assert index_kwargs["002963"]["tracking_target"] == {
+        "target_type": "linked_etf_a_share",
+        "security_code": "159934",
+        "market": "A股",
+        "tracking_name": "易方达黄金ETF",
+    }
+    assert index_kwargs["017193"]["tracking_target"] == {
+        "target_type": "linked_etf_a_share",
+        "security_code": "159157",
+        "market": "A股",
+        "tracking_name": "天弘中证工业有色金属主题ETF",
+    }
+    assert index_kwargs["022464"]["tracking_target"] == {
+        "target_type": "linked_etf_a_share",
+        "security_code": "563220",
+        "market": "A股",
+        "tracking_name": "富国中证A500ETF",
+    }
+    summary_messages = [
+        call.args[0]
+        for call in mock_logger_info.call_args_list
+        if call.args and isinstance(call.args[0], str) and "批量估算完成" in call.args[0]
+    ]
+    assert any("requested=17" in message and "succeeded=17" in message and "failed=0" in message for message in summary_messages)
+    assert any("failure_breakdown={}" in message for message in summary_messages)
+    assert all("中证A500指数(weight=95.0)" not in message for message in summary_messages)
+    assert all("中证工业有色金属主题指数(weight=95.0)" not in message for message in summary_messages)
+    assert all("QDII市场画像为 unsupported" not in message for message in summary_messages)
+
+
+def test_nav_engine_strict_run_recovers_from_empty_holdings_cache_for_016874():
+    engine = NAVEngine(strict=True)
+    fund_info = {
+        "code": "016874",
+        "name": "广发远见智选混合型证券投资基金",
+        "type": "混合型-偏股",
+        "benchmark": "沪深300指数收益率×60%+人民币计价的恒生指数收益率×20%+中债-新综合财富（总值）指数收益率×20%",
+        "management_fee": 0.015,
+        "custody_fee": 0.0025,
+    }
+    holdings_cache_key = _fetcher_cache_key(FundFetcher.get_portfolio_holdings, engine.fund_fetcher, "016874")
+    holdings_none_cache_key = _fetcher_cache_key(FundFetcher.get_portfolio_holdings, engine.equity_estimator.fund_fetcher, "016874", None)
+    history_cache_key = _fetcher_cache_key(
+        FundFetcher.get_portfolio_holdings_history,
+        engine.fund_fetcher,
+        fund_code="016874",
+        years=[2026, 2025],
+    )
+
+    for cache_key in [holdings_cache_key, holdings_none_cache_key, history_cache_key]:
+        BaseFetcher.cache.delete(cache_key)
+        BaseFetcher.cache.set(cache_key, pd.DataFrame(), ttl=86400)
+
+    def portfolio_side_effect(symbol, date):
+        return _raw_em_holdings_df() if symbol == "016874" and str(date) == "2025" else pd.DataFrame()
+
+    def estimate_success(**kwargs):
+        holdings_df = engine.equity_estimator.fund_fetcher.get_portfolio_holdings(kwargs["fund_code"], None)
+        assert not holdings_df.empty
+        return {
+            "fund_code": kwargs["fund_code"],
+            "estimated_nav": 1.7281,
+            "estimated_return": -0.07,
+            "nav_date": kwargs["nav_date"],
+            "warnings": [],
+        }
+
+    try:
+        with patch.object(engine.fund_fetcher, "get_fund_info", return_value=fund_info), \
+             patch.object(engine.fund_fetcher, "get_previous_official_nav", return_value=(1.7293, "2026-04-14")), \
+             patch("otc_fund_quant.nav_estimator.data.fetcher.fund_fetcher.ak.fund_portfolio_hold_em", side_effect=portfolio_side_effect), \
+             patch("otc_fund_quant.nav_estimator.core.nav_engine.build_confidence_payload", return_value={}), \
+             patch.object(engine.equity_estimator, "estimate", side_effect=estimate_success) as mock_equity_estimate, \
+             patch.object(engine.index_estimator, "estimate", side_effect=AssertionError("should not use index estimator")), \
+             patch.object(engine.qdii_estimator, "estimate", side_effect=AssertionError("should not use qdii estimator")), \
+             patch.object(engine.bond_estimator, "estimate", side_effect=AssertionError("should not use bond estimator")):
+            results_df = engine.run(["016874"], strict=True)
+
+        assert list(results_df["fund_code"]) == ["016874"]
+        assert set(results_df["status"]) == {"成功"}
+        mock_equity_estimate.assert_called_once()
+        assert "未获取到基金 016874 的持仓数据" not in str(results_df.iloc[0].get("error", ""))
+
+        for cache_key in [holdings_cache_key, holdings_none_cache_key, history_cache_key]:
+            cached = BaseFetcher.cache.get(cache_key)
+            assert isinstance(cached, pd.DataFrame)
+            assert not cached.empty
+    finally:
+        for cache_key in [holdings_cache_key, holdings_none_cache_key, history_cache_key]:
+            BaseFetcher.cache.delete(cache_key)
+
+
 def test_qdii_index_strict_still_rejects_zero_disclosed_stock_position():
     estimator = QDIIHKEstimator()
 
@@ -2482,6 +3322,30 @@ def test_failure_response_preserves_quality_gate_details():
 
     assert details["quality_policy"] == "quality_first"
     assert details["quality_gate_failed_reasons"] == ["缺少基金披露股票总仓位"]
+
+
+def test_dca_estimates_response_preserves_backend_failure_message():
+    with patch.object(
+        web_app,
+        "_estimate_navs",
+        return_value={
+            "results": [
+                {
+                    "fund_code": "015916",
+                    "status": "失败",
+                    "warnings": [],
+                    "details": {
+                        "error": "持仓权重-06618 取值为 0.78，疑似传入比例值；请传入百分比（例如 93 表示 93%）"
+                    },
+                }
+            ]
+        },
+    ):
+        payload = web_app._build_dca_estimates_response(["015916"], strict=True)
+
+    assert payload["strict_mode"] is True
+    assert payload["results"][0]["status"] == "failed"
+    assert payload["results"][0]["message"].startswith("持仓权重-06618 取值为 0.78")
 
 
 def test_analyze_api_smoke_unchanged():

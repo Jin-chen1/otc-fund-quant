@@ -70,22 +70,52 @@ class DcaWebTestCase(unittest.TestCase):
         trade_date,
         amount,
         *,
+        trade_type=None,
+        sell_input_mode=None,
+        requested_shares=None,
         status,
+        status_reason=None,
         confirm_nav_date=None,
         confirm_nav=None,
         shares=None,
+        deficit_shares_remaining=0.0,
+        offset_shares=0.0,
+        fee=None,
+        net_cash=None,
+        realized_pnl=None,
     ):
+        trade_type = trade_type or self.web_app.DCA_TRADE_TYPE_BUY
         conn = sqlite3.connect(self.rec_db_path)
         cursor = conn.cursor()
         cursor.execute(
             """
             INSERT INTO dca_records (
-                fund_code, trade_date, amount, status,
-                confirm_nav_date, confirm_nav, shares, confirmed_at
+                fund_code, trade_date, trade_type, sell_input_mode, amount, requested_shares,
+                status, status_reason, confirm_nav_date, confirm_nav, shares,
+                deficit_shares_remaining, offset_shares, fee, net_cash,
+                realized_pnl, confirmed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'confirmed' THEN CURRENT_TIMESTAMP ELSE NULL END)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'confirmed' THEN CURRENT_TIMESTAMP ELSE NULL END)
             """,
-            (fund_code, trade_date, amount, status, confirm_nav_date, confirm_nav, shares, status),
+            (
+                fund_code,
+                trade_date,
+                trade_type,
+                sell_input_mode,
+                amount,
+                requested_shares,
+                status,
+                status_reason,
+                confirm_nav_date,
+                confirm_nav,
+                shares,
+                deficit_shares_remaining,
+                offset_shares,
+                fee,
+                net_cash,
+                realized_pnl,
+                status,
+            ),
         )
         conn.commit()
         conn.close()
@@ -496,6 +526,494 @@ class DcaWebTestCase(unittest.TestCase):
             self.assertIsNone(self.web_app._dca_snapshot_state["payload"])
             self.assertIsNone(self.web_app._dca_snapshot_state["generated_at"])
             self.assertTrue(self.web_app._dca_snapshot_state["dirty"])
+
+    def test_sync_dca_records_confirms_pending_record_after_loader_update(self):
+        self._insert_dca_record(
+            "000001",
+            "2026-03-12",
+            125.0,
+            status=self.web_app.DCA_STATUS_PENDING,
+        )
+
+        def _write_latest_nav(_fund_code):
+            self._seed_nav_rows([
+                ("2026-03-13", "000001", 1.25, 1.25),
+            ])
+
+        with patch.object(self.web_app.loader, "update_db", side_effect=_write_latest_nav) as mock_update_db:
+            self.web_app._sync_dca_records()
+
+        self.assertEqual(mock_update_db.call_count, 1)
+        self.assertEqual(mock_update_db.call_args.args[0], "000001")
+
+        conn = sqlite3.connect(self.rec_db_path)
+        row = conn.execute(
+            """
+            SELECT status, confirm_nav_date, confirm_nav, shares
+            FROM dca_records
+            WHERE fund_code = ?
+            """,
+            ("000001",),
+        ).fetchone()
+        conn.close()
+
+        self.assertEqual(row[0], self.web_app.DCA_STATUS_CONFIRMED)
+        self.assertEqual(row[1], "2026-03-13")
+        self.assertAlmostEqual(row[2], 1.25)
+        self.assertAlmostEqual(row[3], 100.0)
+
+    def test_dca_records_migrates_legacy_buy_only_schema(self):
+        conn = sqlite3.connect(self.rec_db_path)
+        conn.execute("DROP TABLE IF EXISTS dca_records")
+        conn.execute("""
+            CREATE TABLE dca_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fund_code TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                amount REAL NOT NULL,
+                status TEXT NOT NULL,
+                confirm_nav_date TEXT,
+                confirm_nav REAL,
+                shares REAL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                confirmed_at TEXT
+            )
+        """)
+        conn.execute("""
+            INSERT INTO dca_records (
+                fund_code, trade_date, amount, status, confirm_nav_date, confirm_nav, shares, confirmed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, ("000001", "2026-03-12", 100.0, "confirmed", "2026-03-13", 1.0, 100.0))
+        conn.commit()
+        conn.close()
+
+        self.web_app = importlib.reload(sys.modules["otc_fund_quant.web.app"])
+        self.web_app.app.config["TESTING"] = True
+        self.client = self.web_app.app.test_client()
+
+        conn = sqlite3.connect(self.rec_db_path)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(dca_records)").fetchall()}
+        row = conn.execute("""
+            SELECT trade_type, sell_input_mode, requested_shares, deficit_shares_remaining, offset_shares,
+                   status, status_reason, fee, net_cash, realized_pnl
+            FROM dca_records
+            WHERE fund_code = ?
+        """, ("000001",)).fetchone()
+        conn.close()
+
+        self.assertIn("trade_type", columns)
+        self.assertIn("sell_input_mode", columns)
+        self.assertIn("requested_shares", columns)
+        self.assertIn("deficit_shares_remaining", columns)
+        self.assertIn("offset_shares", columns)
+        self.assertIn("status_reason", columns)
+        self.assertIn("net_cash", columns)
+        self.assertEqual(row[0], self.web_app.DCA_TRADE_TYPE_BUY)
+        self.assertIsNone(row[1])
+        self.assertIsNone(row[2])
+        self.assertEqual(row[3], 0.0)
+        self.assertEqual(row[4], 0.0)
+        self.assertEqual(row[5], self.web_app.DCA_STATUS_CONFIRMED)
+        self.assertIsNone(row[6])
+        self.assertIsNone(row[7])
+        self.assertIsNone(row[8])
+        self.assertIsNone(row[9])
+
+    def test_create_sell_record_accepts_when_no_position_exists(self):
+        response = self.client.post(
+            "/api/dca/records",
+            json={"fund_code": "000001", "trade_type": "sell", "trade_date": "2026-03-12", "amount": 50.0},
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertEqual(payload["trade_type"], self.web_app.DCA_TRADE_TYPE_SELL)
+        self.assertEqual(payload["status"], self.web_app.DCA_STATUS_PENDING)
+
+    def test_create_sell_record_by_shares_accepts_when_no_position_exists(self):
+        response = self.client.post(
+            "/api/dca/records",
+            json={
+                "fund_code": "000001",
+                "trade_type": "sell",
+                "sell_input_mode": "shares",
+                "trade_date": "2026-03-12",
+                "shares": 10.0,
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertEqual(payload["trade_type"], self.web_app.DCA_TRADE_TYPE_SELL)
+        self.assertEqual(payload["sell_input_mode"], self.web_app.DCA_SELL_INPUT_MODE_SHARES)
+        self.assertEqual(payload["status"], self.web_app.DCA_STATUS_PENDING)
+
+    def test_create_sell_record_accepts_existing_position(self):
+        self._seed_nav_rows([
+            ("2026-03-06", "000001", 1.5000, 1.5000),
+        ])
+        self._insert_dca_record(
+            "000001",
+            "2026-03-05",
+            150.0,
+            status=self.web_app.DCA_STATUS_CONFIRMED,
+            confirm_nav_date="2026-03-06",
+            confirm_nav=1.5,
+            shares=100.0,
+        )
+
+        response = self.client.post(
+            "/api/dca/records",
+            json={"fund_code": "000001", "trade_type": "sell", "trade_date": "2026-03-07", "amount": 90.0},
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertEqual(payload["trade_type"], self.web_app.DCA_TRADE_TYPE_SELL)
+        self.assertEqual(payload["status"], self.web_app.DCA_STATUS_PENDING)
+
+        conn = sqlite3.connect(self.rec_db_path)
+        row = conn.execute("""
+            SELECT trade_type, status, amount
+            FROM dca_records
+            WHERE id = ?
+        """, (payload["id"],)).fetchone()
+        conn.close()
+
+        self.assertEqual(row[0], self.web_app.DCA_TRADE_TYPE_SELL)
+        self.assertEqual(row[1], self.web_app.DCA_STATUS_PENDING)
+        self.assertAlmostEqual(row[2], 90.0)
+
+    def test_create_sell_record_by_shares_accepts_when_shares_exceed_position(self):
+        self._seed_nav_rows([
+            ("2026-03-06", "000001", 1.5000, 1.5000),
+        ])
+        self._insert_dca_record(
+            "000001",
+            "2026-03-05",
+            150.0,
+            status=self.web_app.DCA_STATUS_CONFIRMED,
+            confirm_nav_date="2026-03-06",
+            confirm_nav=1.5,
+            shares=100.0,
+        )
+
+        response = self.client.post(
+            "/api/dca/records",
+            json={
+                "fund_code": "000001",
+                "trade_type": "sell",
+                "sell_input_mode": "shares",
+                "trade_date": "2026-03-07",
+                "shares": 120.0,
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertEqual(payload["trade_type"], self.web_app.DCA_TRADE_TYPE_SELL)
+        self.assertEqual(payload["sell_input_mode"], self.web_app.DCA_SELL_INPUT_MODE_SHARES)
+        self.assertAlmostEqual(payload["requested_shares"], 120.0)
+
+    def test_create_sell_record_by_shares_accepts_existing_position(self):
+        self._seed_nav_rows([
+            ("2026-03-06", "000001", 1.5000, 1.5000),
+        ])
+        self._insert_dca_record(
+            "000001",
+            "2026-03-05",
+            150.0,
+            status=self.web_app.DCA_STATUS_CONFIRMED,
+            confirm_nav_date="2026-03-06",
+            confirm_nav=1.5,
+            shares=100.0,
+        )
+
+        response = self.client.post(
+            "/api/dca/records",
+            json={
+                "fund_code": "000001",
+                "trade_type": "sell",
+                "sell_input_mode": "shares",
+                "trade_date": "2026-03-07",
+                "shares": 40.0,
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertEqual(payload["trade_type"], self.web_app.DCA_TRADE_TYPE_SELL)
+        self.assertEqual(payload["sell_input_mode"], self.web_app.DCA_SELL_INPUT_MODE_SHARES)
+        self.assertIsNone(payload["amount"])
+        self.assertAlmostEqual(payload["requested_shares"], 40.0)
+        self.assertAlmostEqual(payload["shares"], 40.0)
+
+        conn = sqlite3.connect(self.rec_db_path)
+        row = conn.execute("""
+            SELECT trade_type, sell_input_mode, amount, requested_shares, status
+            FROM dca_records
+            WHERE id = ?
+        """, (payload["id"],)).fetchone()
+        conn.close()
+
+        self.assertEqual(row[0], self.web_app.DCA_TRADE_TYPE_SELL)
+        self.assertEqual(row[1], self.web_app.DCA_SELL_INPUT_MODE_SHARES)
+        self.assertIsNone(row[2])
+        self.assertAlmostEqual(row[3], 40.0)
+        self.assertEqual(row[4], self.web_app.DCA_STATUS_PENDING)
+
+    def test_sync_dca_records_confirms_sell_and_updates_portfolio_summary(self):
+        self._insert_dca_record(
+            "000001",
+            "2026-03-10",
+            150.0,
+            status=self.web_app.DCA_STATUS_PENDING,
+        )
+        self._insert_dca_record(
+            "000001",
+            "2026-03-12",
+            90.0,
+            trade_type=self.web_app.DCA_TRADE_TYPE_SELL,
+            status=self.web_app.DCA_STATUS_PENDING,
+        )
+
+        def _write_nav_rows(_fund_code):
+            self._seed_nav_rows([
+                ("2026-03-11", "000001", 1.5, 1.5),
+                ("2026-03-12", "000001", 1.8, 1.8),
+            ])
+
+        with patch.object(self.web_app.loader, "update_db", side_effect=_write_nav_rows):
+            self.web_app._sync_dca_records()
+
+        conn = sqlite3.connect(self.rec_db_path)
+        rows = conn.execute("""
+            SELECT trade_type, status, confirm_nav_date, confirm_nav, shares, fee, net_cash, realized_pnl
+            FROM dca_records
+            ORDER BY id
+        """).fetchall()
+        conn.close()
+
+        self.assertEqual(rows[0][0], self.web_app.DCA_TRADE_TYPE_BUY)
+        self.assertEqual(rows[0][1], self.web_app.DCA_STATUS_CONFIRMED)
+        self.assertEqual(rows[1][0], self.web_app.DCA_TRADE_TYPE_SELL)
+        self.assertEqual(rows[1][1], self.web_app.DCA_STATUS_CONFIRMED)
+        self.assertEqual(rows[1][2], "2026-03-12")
+        self.assertAlmostEqual(rows[1][3], 1.8)
+        self.assertAlmostEqual(rows[1][4], 50.0)
+        self.assertAlmostEqual(rows[1][5], 1.35)
+        self.assertAlmostEqual(rows[1][6], 88.65)
+        self.assertAlmostEqual(rows[1][7], 13.65)
+
+        with patch.object(self.web_app, "_schedule_dca_snapshot_sync_if_needed", return_value=False), patch.object(
+            self.web_app.dca_fund_fetcher,
+            "get_fund_info",
+            return_value={"name": "测试基金卖出"},
+        ):
+            response = self.client.get("/api/dca/portfolio")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        fund = payload["funds"][0]
+        self.assertAlmostEqual(fund["remaining_cost_basis"], 75.0)
+        self.assertAlmostEqual(fund["total_shares"], 50.0)
+        self.assertAlmostEqual(fund["current_value"], 90.0)
+        self.assertAlmostEqual(fund["unrealized_profit_amount"], 15.0)
+        self.assertAlmostEqual(fund["realized_profit_amount"], 13.65)
+        self.assertEqual(payload["records"][0]["trade_type"], self.web_app.DCA_TRADE_TYPE_SELL)
+        self.assertAlmostEqual(payload["records"][0]["net_cash"], 88.65)
+        self.assertAlmostEqual(payload["records"][0]["realized_pnl"], 13.65)
+        self.assertAlmostEqual(payload["portfolio"]["total_remaining_cost_basis"], 75.0)
+        self.assertAlmostEqual(payload["portfolio"]["total_realized_profit_amount"], 13.65)
+
+    def test_sync_dca_records_confirms_sell_by_shares_and_backfills_amount(self):
+        self._insert_dca_record(
+            "000001",
+            "2026-03-10",
+            150.0,
+            status=self.web_app.DCA_STATUS_PENDING,
+        )
+        self._insert_dca_record(
+            "000001",
+            "2026-03-12",
+            None,
+            trade_type=self.web_app.DCA_TRADE_TYPE_SELL,
+            sell_input_mode=self.web_app.DCA_SELL_INPUT_MODE_SHARES,
+            requested_shares=40.0,
+            status=self.web_app.DCA_STATUS_PENDING,
+        )
+
+        def _write_nav_rows(_fund_code):
+            self._seed_nav_rows([
+                ("2026-03-11", "000001", 1.5, 1.5),
+                ("2026-03-12", "000001", 1.8, 1.8),
+            ])
+
+        with patch.object(self.web_app.loader, "update_db", side_effect=_write_nav_rows):
+            self.web_app._sync_dca_records()
+
+        conn = sqlite3.connect(self.rec_db_path)
+        row = conn.execute("""
+            SELECT sell_input_mode, amount, requested_shares, shares, fee, net_cash, realized_pnl, status
+            FROM dca_records
+            WHERE id = 2
+        """).fetchone()
+        conn.close()
+
+        self.assertEqual(row[0], self.web_app.DCA_SELL_INPUT_MODE_SHARES)
+        self.assertAlmostEqual(row[1], 72.0)
+        self.assertAlmostEqual(row[2], 40.0)
+        self.assertAlmostEqual(row[3], 40.0)
+        self.assertAlmostEqual(row[4], 1.08)
+        self.assertAlmostEqual(row[5], 70.92)
+        self.assertAlmostEqual(row[6], 10.92)
+        self.assertEqual(row[7], self.web_app.DCA_STATUS_CONFIRMED)
+
+        with patch.object(self.web_app, "_schedule_dca_snapshot_sync_if_needed", return_value=False), patch.object(
+            self.web_app.dca_fund_fetcher,
+            "get_fund_info",
+            return_value={"name": "测试基金份额卖出"},
+        ):
+            response = self.client.get("/api/dca/portfolio")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        sell_record = payload["records"][0]
+        self.assertEqual(sell_record["sell_input_mode"], self.web_app.DCA_SELL_INPUT_MODE_SHARES)
+        self.assertAlmostEqual(sell_record["requested_shares"], 40.0)
+        self.assertAlmostEqual(sell_record["amount"], 72.0)
+        self.assertAlmostEqual(sell_record["shares"], 40.0)
+
+    def test_sync_dca_records_confirms_oversell_and_tracks_deficit_shares(self):
+        self._insert_dca_record(
+            "000001",
+            "2026-03-10",
+            100.0,
+            status=self.web_app.DCA_STATUS_PENDING,
+        )
+        self._insert_dca_record(
+            "000001",
+            "2026-03-11",
+            150.0,
+            trade_type=self.web_app.DCA_TRADE_TYPE_SELL,
+            status=self.web_app.DCA_STATUS_PENDING,
+        )
+
+        def _write_nav_rows(_fund_code):
+            self._seed_nav_rows([
+                ("2026-03-10", "000001", 1.0, 1.0),
+                ("2026-03-11", "000001", 1.0, 1.0),
+            ])
+
+        with patch.object(self.web_app.loader, "update_db", side_effect=_write_nav_rows):
+            self.web_app._sync_dca_records()
+
+        conn = sqlite3.connect(self.rec_db_path)
+        row = conn.execute("""
+            SELECT status, status_reason, confirm_nav_date, confirm_nav, shares,
+                   deficit_shares_remaining, offset_shares, fee, net_cash, realized_pnl
+            FROM dca_records
+            WHERE id = 2
+        """).fetchone()
+        conn.close()
+
+        self.assertEqual(row[0], self.web_app.DCA_STATUS_CONFIRMED)
+        self.assertIsNone(row[1])
+        self.assertEqual(row[2], "2026-03-11")
+        self.assertAlmostEqual(row[3], 1.0)
+        self.assertAlmostEqual(row[4], 150.0)
+        self.assertAlmostEqual(row[5], 50.0)
+        self.assertAlmostEqual(row[6], 0.0)
+        self.assertAlmostEqual(row[7], 1.5)
+        self.assertAlmostEqual(row[8], 148.5)
+        self.assertAlmostEqual(row[9], -1.5)
+
+        with patch.object(self.web_app, "_schedule_dca_snapshot_sync_if_needed", return_value=False), patch.object(
+            self.web_app.dca_fund_fetcher,
+            "get_fund_info",
+            return_value={"name": "测试基金超卖"},
+        ):
+            response = self.client.get("/api/dca/portfolio")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        fund = payload["funds"][0]
+        self.assertAlmostEqual(fund["deficit_shares"], 50.0)
+        self.assertAlmostEqual(payload["portfolio"]["total_deficit_shares"], 50.0)
+        self.assertAlmostEqual(payload["records"][0]["deficit_shares_remaining"], 50.0)
+        self.assertAlmostEqual(payload["records"][0]["offset_shares"], 0.0)
+
+    def test_sync_dca_records_offsets_oversell_with_future_buy(self):
+        self._insert_dca_record(
+            "000001",
+            "2026-03-10",
+            100.0,
+            status=self.web_app.DCA_STATUS_PENDING,
+        )
+        self._insert_dca_record(
+            "000001",
+            "2026-03-11",
+            150.0,
+            trade_type=self.web_app.DCA_TRADE_TYPE_SELL,
+            status=self.web_app.DCA_STATUS_PENDING,
+        )
+        self._insert_dca_record(
+            "000001",
+            "2026-03-12",
+            60.0,
+            status=self.web_app.DCA_STATUS_PENDING,
+        )
+
+        def _write_nav_rows(_fund_code):
+            self._seed_nav_rows([
+                ("2026-03-10", "000001", 1.0, 1.0),
+                ("2026-03-11", "000001", 1.0, 1.0),
+                ("2026-03-12", "000001", 0.8, 0.8),
+            ])
+
+        with patch.object(self.web_app.loader, "update_db", side_effect=_write_nav_rows):
+            self.web_app._sync_dca_records()
+
+        conn = sqlite3.connect(self.rec_db_path)
+        sell_row = conn.execute("""
+            SELECT deficit_shares_remaining, realized_pnl, net_cash, fee, shares, status
+            FROM dca_records
+            WHERE id = 2
+        """).fetchone()
+        buy_row = conn.execute("""
+            SELECT shares, offset_shares, status
+            FROM dca_records
+            WHERE id = 3
+        """).fetchone()
+        conn.close()
+
+        self.assertAlmostEqual(sell_row[0], 0.0)
+        self.assertAlmostEqual(sell_row[1], 8.5)
+        self.assertAlmostEqual(sell_row[2], 148.5)
+        self.assertAlmostEqual(sell_row[3], 1.5)
+        self.assertAlmostEqual(sell_row[4], 150.0)
+        self.assertEqual(sell_row[5], self.web_app.DCA_STATUS_CONFIRMED)
+        self.assertAlmostEqual(buy_row[0], 75.0)
+        self.assertAlmostEqual(buy_row[1], 50.0)
+        self.assertEqual(buy_row[2], self.web_app.DCA_STATUS_CONFIRMED)
+
+        with patch.object(self.web_app, "_schedule_dca_snapshot_sync_if_needed", return_value=False), patch.object(
+            self.web_app.dca_fund_fetcher,
+            "get_fund_info",
+            return_value={"name": "测试基金自动抵扣"},
+        ):
+            response = self.client.get("/api/dca/portfolio")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        fund = payload["funds"][0]
+        self.assertAlmostEqual(fund["total_shares"], 25.0)
+        self.assertAlmostEqual(fund["remaining_cost_basis"], 20.0)
+        self.assertAlmostEqual(fund["deficit_shares"], 0.0)
+        self.assertAlmostEqual(fund["realized_profit_amount"], 8.5)
+        self.assertAlmostEqual(payload["portfolio"]["total_deficit_shares"], 0.0)
+        self.assertAlmostEqual(payload["records"][0]["offset_shares"], 50.0)
 
 
 if __name__ == "__main__":

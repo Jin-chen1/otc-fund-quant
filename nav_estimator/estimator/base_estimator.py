@@ -7,6 +7,28 @@ class BaseEstimator:
     """所有估算器的基类。"""
 
     @staticmethod
+    def _parse_percentage_like_value(value, field_name: str) -> float:
+        if value is None:
+            raise ValueError(f"{field_name} 不能为空")
+
+        parsed_value = value
+        if isinstance(value, str):
+            raw_value = value.strip()
+            if raw_value == "":
+                raise ValueError(f"{field_name} 不能为空字符串")
+            if raw_value.endswith("%"):
+                raw_value = raw_value[:-1].strip()
+            try:
+                parsed_value = float(raw_value)
+            except ValueError as exc:
+                raise ValueError(f"{field_name} 无法解析为百分比数值: {value}") from exc
+
+        if not isinstance(parsed_value, (int, float)):
+            raise TypeError(f"{field_name} 必须是数值类型，当前为: {type(parsed_value)}")
+
+        return float(parsed_value)
+
+    @staticmethod
     def normalize_date(date_value: str | date | datetime, field_name: str) -> date:
         if isinstance(date_value, datetime):
             return date_value.date()
@@ -38,27 +60,16 @@ class BaseEstimator:
 
     @staticmethod
     def validate_percentage(value, field_name: str) -> float:
-        if value is None:
-            raise ValueError(f"{field_name} 不能为空")
-
-        parsed_value = value
-        if isinstance(value, str):
-            raw_value = value.strip()
-            if raw_value == "":
-                raise ValueError(f"{field_name} 不能为空字符串")
-            if raw_value.endswith("%"):
-                raw_value = raw_value[:-1].strip()
-            try:
-                parsed_value = float(raw_value)
-            except ValueError as exc:
-                raise ValueError(f"{field_name} 无法解析为百分比数值: {value}") from exc
-
-        if not isinstance(parsed_value, (int, float)):
-            raise TypeError(f"{field_name} 必须是数值类型，当前为: {type(parsed_value)}")
-
-        value_float = float(parsed_value)
+        value_float = BaseEstimator._parse_percentage_like_value(value, field_name)
         if 0 < value_float < 1:
             raise ValueError(f"{field_name} 取值为 {value_float}，疑似传入比例值；请传入百分比（例如 93 表示 93%）")
+        if value_float < 0 or value_float > 100:
+            raise ValueError(f"{field_name} 超出范围[0,100]，当前值: {value_float}")
+        return value_float
+
+    @staticmethod
+    def validate_holding_weight_percentage(value, field_name: str) -> float:
+        value_float = BaseEstimator._parse_percentage_like_value(value, field_name)
         if value_float < 0 or value_float > 100:
             raise ValueError(f"{field_name} 超出范围[0,100]，当前值: {value_float}")
         return value_float

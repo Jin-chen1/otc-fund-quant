@@ -2,7 +2,6 @@ import logging
 import os
 from datetime import datetime
 
-import akshare as ak
 import pandas as pd
 
 from .sqlite_utils import connect_sqlite, run_sqlite_write_with_retry
@@ -44,7 +43,7 @@ class DataLoader:
 
     def fetch_nav(self, fund_code, start_date, end_date):
         """
-        Fetch NAV data using akshare.
+        Fetch NAV data from pingzhongdata.js and normalize it for local storage.
 
         Args:
             fund_code (str): Fund code (e.g., '005658')
@@ -55,74 +54,28 @@ class DataLoader:
             pd.DataFrame: DataFrame with columns ['date', 'nav', 'acc_nav']
         """
         try:
-            # fund_open_fund_info_em returns date, net_value, accumulated_net_value, etc.
-            # adjusting parameters to match akshare's API
-            fund_data = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
+            try:
+                from otc_fund_quant.nav_estimator.data.fetcher.fund_fetcher import FundFetcher
+            except ImportError:
+                from nav_estimator.data.fetcher.fund_fetcher import FundFetcher
 
-            # Filter by date
-            fund_data['净值日期'] = pd.to_datetime(fund_data['净值日期'])
-            mask = (fund_data['净值日期'] >= pd.to_datetime(start_date)) & \
-                   (fund_data['净值日期'] <= pd.to_datetime(end_date))
+            fund_data = FundFetcher.get_pingzhongdata_nav_history_df(fund_code)
+            fund_data = fund_data.copy()
+            fund_data["净值日期"] = pd.to_datetime(fund_data["净值日期"], errors="coerce")
+
+            mask = (fund_data["净值日期"] >= pd.to_datetime(start_date)) & (
+                fund_data["净值日期"] <= pd.to_datetime(end_date)
+            )
             filtered_data = fund_data.loc[mask].copy()
-
-            # Rename columns to match our schema
-            # akshare output columns: 净值日期, 单位净值, 日增长率, etc.
-            # We need to ensure we get accumulated nav if available,
-            # but fund_open_fund_info_em mainly gives unit nav.
-            # Let's check if we need another API for accumulated NAV or if it's included.
-            # Usually fund_open_fund_info_em gives basic history.
-
-            # Mapping
-            # 净值日期 -> date
-            # 单位净值 -> nav
-            # akshare '单位净值走势' usually just returns unit nav.
-            # '累计净值走势' is a different indicator?
-            # Let's try to get both or assume standard structure.
-
-            # Actually ak.fund_open_fund_info_em(symbol=fund_code, indicator="累计净值走势") gets acc nav.
-            # Getting both might require two calls or a different API.
-            # Let's use fund_etf_hist_em for ETFs or fund_open_fund_info_em for open funds.
-            # Assuming open funds given the context.
-
-            # To get both Unit NAV and Accumulated NAV efficiently, we might need:
-            # fund_open_fund_info_em defaults to unit nav.
-
-            # Let's try a more comprehensive API if available, or just map what we have.
-            # If we only get Unit NAV, we might leave Acc NAV as None or fetch separately.
-            # For simplicity and robustness, let's fetch Unit NAV first.
+            if filtered_data.empty:
+                return pd.DataFrame(columns=["date", "fund_code", "nav", "acc_nav"])
 
             result = pd.DataFrame()
-            result['date'] = filtered_data['净值日期'].dt.strftime('%Y-%m-%d')
-            result['fund_code'] = fund_code
-            result['nav'] = filtered_data['单位净值'].astype(float)
-
-            # Attempt to get Accumulated NAV if possible, otherwise set to equal NAV or 0
-            # For accurate Acc NAV, we might need a separate call.
-            # Let's try to fetch acc nav separately and merge.
-            try:
-                acc_data = ak.fund_open_fund_info_em(symbol=fund_code, indicator="累计净值走势")
-                acc_data['净值日期'] = pd.to_datetime(acc_data['净值日期'])
-                acc_mask = (acc_data['净值日期'] >= pd.to_datetime(start_date)) & \
-                           (acc_data['净值日期'] <= pd.to_datetime(end_date))
-                acc_filtered = acc_data.loc[acc_mask].copy()
-
-                # Merge
-                # acc_filtered has '净值日期' and '累计净值'
-                acc_filtered['date_str'] = acc_filtered['净值日期'].dt.strftime('%Y-%m-%d')
-
-                # Create a mapping dict
-                acc_map = dict(zip(acc_filtered['date_str'], acc_filtered['累计净值']))
-
-                result['acc_nav'] = result['date'].map(acc_map)
-
-                # Fill missing acc_nav with nav if missing (fallback)
-                result['acc_nav'] = result['acc_nav'].fillna(result['nav'])
-
-            except Exception as e:
-                print(f"Warning: Could not fetch accumulated NAV: {e}")
-                result['acc_nav'] = result['nav']
-
-            return result[['date', 'fund_code', 'nav', 'acc_nav']]
+            result["date"] = filtered_data["净值日期"].dt.strftime("%Y-%m-%d")
+            result["fund_code"] = fund_code
+            result["nav"] = pd.to_numeric(filtered_data["单位净值"], errors="coerce").astype(float)
+            result["acc_nav"] = pd.to_numeric(filtered_data["累计净值"], errors="coerce").fillna(result["nav"]).astype(float)
+            return result[["date", "fund_code", "nav", "acc_nav"]]
 
         except Exception as e:
             print(f"Error fetching data for {fund_code}: {e}")

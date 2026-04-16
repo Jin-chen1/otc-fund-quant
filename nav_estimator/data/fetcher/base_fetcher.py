@@ -10,6 +10,7 @@ from functools import wraps
 from typing import Any, Callable
 
 from loguru import logger
+import pandas as pd
 import requests
 
 from ..cache.cache_manager import CacheManager
@@ -87,6 +88,10 @@ class BaseFetcher:
     @staticmethod
     def _normalize_error_message(error: Exception) -> str:
         return " ".join(str(error).split())
+
+    @staticmethod
+    def _is_empty_dataframe(value: Any) -> bool:
+        return isinstance(value, pd.DataFrame) and value.empty
 
     @staticmethod
     def _is_proxy_related_error(error: Exception) -> bool:
@@ -268,17 +273,28 @@ class BaseFetcher:
         )
 
     @staticmethod
-    def with_cache(ttl: int = 300):
+    def with_cache(
+        ttl: int = 300,
+        *,
+        refresh_on_cached_empty_dataframe: bool = False,
+        cache_empty_dataframe: bool = True,
+    ):
         def decorator(func: Callable) -> Callable:
             @wraps(func)
             def wrapper(*args, **kwargs) -> Any:
                 cache_key = BaseFetcher._build_cache_key(func, args, kwargs)
                 cached = BaseFetcher.cache.get(cache_key)
                 if cached is not None:
-                    return cached
+                    if refresh_on_cached_empty_dataframe and BaseFetcher._is_empty_dataframe(cached):
+                        BaseFetcher.cache.delete(cache_key)
+                    else:
+                        return cached
                 try:
                     result = func(*args, **kwargs)
                     if result is not None:
+                        if BaseFetcher._is_empty_dataframe(result) and not cache_empty_dataframe:
+                            BaseFetcher.cache.delete(cache_key)
+                            return result
                         BaseFetcher.cache.set(cache_key, result, ttl)
                     return result
                 except Exception as e:

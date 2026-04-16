@@ -13,6 +13,7 @@ import re
 import logging
 import threading
 import uuid
+from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, date, timedelta
 from time import perf_counter
@@ -38,6 +39,7 @@ from otc_fund_quant.analysis.backtest import calc_period_returns, get_backtest_t
 from otc_fund_quant.analysis.chart import get_chart_data
 from otc_fund_quant.analysis.strategy_registry import get_strategy_definition
 from otc_fund_quant.config.loader import resolve_strategy_context
+from otc_fund_quant.core.position import Position
 from otc_fund_quant.nav_estimator import NAVEngine
 from otc_fund_quant.nav_estimator.data.fetcher.fund_fetcher import FundFetcher
 
@@ -58,6 +60,11 @@ REC_DB_PATH = os.environ.get(
 
 DCA_STATUS_PENDING = "pending"
 DCA_STATUS_CONFIRMED = "confirmed"
+DCA_STATUS_REJECTED = "rejected"
+DCA_TRADE_TYPE_BUY = "buy"
+DCA_TRADE_TYPE_SELL = "sell"
+DCA_SELL_INPUT_MODE_AMOUNT = "amount"
+DCA_SELL_INPUT_MODE_SHARES = "shares"
 DCA_SNAPSHOT_STALE_TTL = timedelta(seconds=60)
 FUND_CODE_PATTERN = re.compile(r"^\d{6}$")
 NAV_ESTIMATOR_SUMMARY_KEYS = {
@@ -109,6 +116,138 @@ _dca_snapshot_state: dict[str, Any] = {
 
 
 # ===== 数据库初始化 =====
+
+def _create_dca_records_table(conn: sqlite3.Connection):
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS dca_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fund_code TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            trade_type TEXT NOT NULL DEFAULT '{DCA_TRADE_TYPE_BUY}'
+                CHECK(trade_type IN ('{DCA_TRADE_TYPE_BUY}', '{DCA_TRADE_TYPE_SELL}')),
+            sell_input_mode TEXT
+                CHECK(sell_input_mode IN ('{DCA_SELL_INPUT_MODE_AMOUNT}', '{DCA_SELL_INPUT_MODE_SHARES}')),
+            amount REAL,
+            requested_shares REAL,
+            status TEXT NOT NULL
+                CHECK(status IN ('{DCA_STATUS_PENDING}', '{DCA_STATUS_CONFIRMED}', '{DCA_STATUS_REJECTED}')),
+            status_reason TEXT,
+            confirm_nav_date TEXT,
+            confirm_nav REAL,
+            shares REAL,
+            deficit_shares_remaining REAL DEFAULT 0,
+            offset_shares REAL DEFAULT 0,
+            fee REAL,
+            net_cash REAL,
+            realized_pnl REAL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            confirmed_at TEXT
+        )
+    """)
+
+
+def _create_dca_records_indexes(conn: sqlite3.Connection):
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_dca_records_fund_code
+        ON dca_records (fund_code)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_dca_records_status_trade_date
+        ON dca_records (status, trade_date)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_dca_records_fund_trade_date_id
+        ON dca_records (fund_code, trade_date, id)
+    """)
+
+
+def _ensure_dca_records_schema(conn: sqlite3.Connection):
+    cursor = conn.execute("PRAGMA table_info(dca_records)")
+    columns = [row[1] for row in cursor.fetchall()]
+    expected_columns = {
+        "id",
+        "fund_code",
+        "trade_date",
+        "trade_type",
+        "sell_input_mode",
+        "amount",
+        "requested_shares",
+        "status",
+        "status_reason",
+        "confirm_nav_date",
+        "confirm_nav",
+        "shares",
+        "deficit_shares_remaining",
+        "offset_shares",
+        "fee",
+        "net_cash",
+        "realized_pnl",
+        "created_at",
+        "confirmed_at",
+    }
+    if not columns:
+        _create_dca_records_table(conn)
+        _create_dca_records_indexes(conn)
+        return
+
+    if expected_columns.issubset(columns):
+        _create_dca_records_indexes(conn)
+        return
+
+    legacy_columns = set(columns)
+    conn.execute("ALTER TABLE dca_records RENAME TO dca_records_legacy")
+    _create_dca_records_table(conn)
+
+    trade_type_expr = (
+        "CASE "
+        f"WHEN LOWER(COALESCE(NULLIF(trade_type, ''), '{DCA_TRADE_TYPE_BUY}')) = '{DCA_TRADE_TYPE_SELL}' THEN '{DCA_TRADE_TYPE_SELL}' "
+        f"ELSE '{DCA_TRADE_TYPE_BUY}' END"
+        if "trade_type" in legacy_columns else f"'{DCA_TRADE_TYPE_BUY}'"
+    )
+    status_expr = (
+        "CASE "
+        f"WHEN LOWER(COALESCE(NULLIF(status, ''), '{DCA_STATUS_PENDING}')) = '{DCA_STATUS_CONFIRMED}' THEN '{DCA_STATUS_CONFIRMED}' "
+        f"WHEN LOWER(COALESCE(NULLIF(status, ''), '{DCA_STATUS_REJECTED}')) = '{DCA_STATUS_REJECTED}' THEN '{DCA_STATUS_REJECTED}' "
+        f"ELSE '{DCA_STATUS_PENDING}' END"
+        if "status" in legacy_columns else f"'{DCA_STATUS_PENDING}'"
+    )
+    confirmed_at_expr = (
+        "confirmed_at"
+        if "confirmed_at" in legacy_columns
+        else f"CASE WHEN ({status_expr}) = '{DCA_STATUS_CONFIRMED}' THEN CURRENT_TIMESTAMP ELSE NULL END"
+    )
+
+    conn.execute(f"""
+        INSERT INTO dca_records (
+            id, fund_code, trade_date, trade_type, sell_input_mode, amount, requested_shares, status, status_reason,
+            confirm_nav_date, confirm_nav, shares, deficit_shares_remaining, offset_shares, fee, net_cash, realized_pnl,
+            created_at, confirmed_at
+        )
+        SELECT
+            id,
+            fund_code,
+            trade_date,
+            {trade_type_expr},
+            {"sell_input_mode" if "sell_input_mode" in legacy_columns else "NULL"},
+            amount,
+            {"requested_shares" if "requested_shares" in legacy_columns else "NULL"},
+            {status_expr},
+            {"status_reason" if "status_reason" in legacy_columns else "NULL"},
+            {"confirm_nav_date" if "confirm_nav_date" in legacy_columns else "NULL"},
+            {"confirm_nav" if "confirm_nav" in legacy_columns else "NULL"},
+            {"shares" if "shares" in legacy_columns else "NULL"},
+            {"deficit_shares_remaining" if "deficit_shares_remaining" in legacy_columns else "0"},
+            {"offset_shares" if "offset_shares" in legacy_columns else "0"},
+            {"fee" if "fee" in legacy_columns else "NULL"},
+            {"net_cash" if "net_cash" in legacy_columns else "NULL"},
+            {"realized_pnl" if "realized_pnl" in legacy_columns else "NULL"},
+            {"created_at" if "created_at" in legacy_columns else "CURRENT_TIMESTAMP"},
+            {confirmed_at_expr}
+        FROM dca_records_legacy
+    """)
+    conn.execute("DROP TABLE dca_records_legacy")
+    _create_dca_records_indexes(conn)
+
 
 def _init_rec_db():
     """初始化推荐记录数据库。"""
@@ -193,28 +332,7 @@ def _init_rec_db():
                 CREATE INDEX IF NOT EXISTS idx_backtest_cache_lookup
                 ON backtest_cache (fund_code, strategy, params_hash, end_date DESC)
             """)
-            conn.execute(f"""
-                CREATE TABLE IF NOT EXISTS dca_records (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    fund_code TEXT NOT NULL,
-                    trade_date TEXT NOT NULL,
-                    amount REAL NOT NULL,
-                    status TEXT NOT NULL CHECK(status IN ('{DCA_STATUS_PENDING}', '{DCA_STATUS_CONFIRMED}')),
-                    confirm_nav_date TEXT,
-                    confirm_nav REAL,
-                    shares REAL,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    confirmed_at TEXT
-                )
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_dca_records_fund_code
-                ON dca_records (fund_code)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_dca_records_status_trade_date
-                ON dca_records (status, trade_date)
-            """)
+            _ensure_dca_records_schema(conn)
             conn.commit()
         finally:
             conn.close()
@@ -719,6 +837,287 @@ def _get_fund_history(fund_code: str) -> pd.DataFrame:
     return df
 
 
+def _parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _normalize_dca_trade_type(value: Any) -> str:
+    trade_type = str(value or DCA_TRADE_TYPE_BUY).strip().lower()
+    if trade_type == DCA_TRADE_TYPE_SELL:
+        return DCA_TRADE_TYPE_SELL
+    return DCA_TRADE_TYPE_BUY
+
+
+def _dca_trade_label(trade_type: str) -> str:
+    return "卖出" if trade_type == DCA_TRADE_TYPE_SELL else "买入"
+
+
+def _normalize_dca_sell_input_mode(value: Any, *, default: str = DCA_SELL_INPUT_MODE_AMOUNT) -> str:
+    sell_input_mode = str(value or default).strip().lower()
+    if sell_input_mode == DCA_SELL_INPUT_MODE_SHARES:
+        return DCA_SELL_INPUT_MODE_SHARES
+    return DCA_SELL_INPUT_MODE_AMOUNT
+
+
+def _load_dca_records(*, fund_code: str | None = None) -> list[sqlite3.Row]:
+    conn = connect_sqlite(REC_DB_PATH, row_factory=sqlite3.Row)
+    try:
+        sql = """
+            SELECT
+                id,
+                fund_code,
+                trade_date,
+                trade_type,
+                sell_input_mode,
+                amount,
+                requested_shares,
+                status,
+                status_reason,
+                confirm_nav_date,
+                confirm_nav,
+                shares,
+                deficit_shares_remaining,
+                offset_shares,
+                fee,
+                net_cash,
+                realized_pnl,
+                created_at,
+                confirmed_at
+            FROM dca_records
+        """
+        params: tuple[Any, ...] = ()
+        if fund_code:
+            sql += " WHERE fund_code = ?"
+            params = (fund_code,)
+        sql += " ORDER BY fund_code, trade_date, id"
+        return conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+
+
+def _load_nav_rows_for_fund(nav_conn: sqlite3.Connection, fund_code: str) -> list[tuple[str, float]]:
+    rows = nav_conn.execute("""
+        SELECT date, nav
+        FROM fund_nav
+        WHERE fund_code = ?
+        ORDER BY date
+    """, (fund_code,)).fetchall()
+    nav_rows: list[tuple[str, float]] = []
+    for nav_date, nav in rows:
+        if nav is None:
+            continue
+        nav_rows.append((str(nav_date), float(nav)))
+    return nav_rows
+
+
+def _simulate_dca_fund_records(records: list[sqlite3.Row], nav_rows: list[tuple[str, float]]) -> dict[str, Any]:
+    fund_code = str(records[0]["fund_code"]) if records else ""
+    position = Position(fund_code)
+    processed_records: list[dict[str, Any]] = []
+    processed_records_by_id: dict[int, dict[str, Any]] = {}
+    deficit_queue: list[dict[str, Any]] = []
+    nav_index = 0
+    pending_buy_amount = 0.0
+    pending_sell_amount = 0.0
+    pending_count = 0
+    rejected_count = 0
+    realized_profit_amount = 0.0
+    start_date = records[0]["trade_date"] if records else date.today().isoformat()
+
+    for row in records:
+        trade_date_str = str(row["trade_date"])
+        trade_type = _normalize_dca_trade_type(row["trade_type"])
+        sell_input_mode = (
+            _normalize_dca_sell_input_mode(row["sell_input_mode"])
+            if trade_type == DCA_TRADE_TYPE_SELL else None
+        )
+        raw_amount = row["amount"]
+        amount = round(float(raw_amount), 2) if raw_amount is not None else None
+        raw_requested_shares = row["requested_shares"]
+        requested_shares = (
+            float(raw_requested_shares)
+            if raw_requested_shares is not None else None
+        )
+        start_date = min(start_date, trade_date_str)
+
+        while nav_index < len(nav_rows) and nav_rows[nav_index][0] < trade_date_str:
+            nav_index += 1
+
+        confirm_nav_date: str | None = None
+        confirm_nav: float | None = None
+        shares: float | None = None
+        fee: float | None = None
+        net_cash: float | None = None
+        realized_pnl: float | None = None
+        deficit_shares_remaining = 0.0
+        offset_shares = 0.0
+        status = DCA_STATUS_PENDING
+        status_reason: str | None = None
+
+        if nav_index < len(nav_rows):
+            confirm_nav_date, confirm_nav = nav_rows[nav_index]
+            if confirm_nav is not None and confirm_nav > 0:
+                confirm_trade_date = _parse_iso_date(confirm_nav_date) or _parse_iso_date(trade_date_str) or date.today()
+                if trade_type == DCA_TRADE_TYPE_BUY:
+                    if amount is None:
+                        amount = 0.0
+                    requested_shares = amount / confirm_nav
+                    shares = requested_shares
+                    remaining_buy_shares = requested_shares
+                    while remaining_buy_shares > 1e-9 and deficit_queue:
+                        deficit_item = deficit_queue[0]
+                        matched_shares = min(remaining_buy_shares, float(deficit_item["remaining_deficit_shares"]))
+                        if matched_shares <= 1e-9:
+                            deficit_queue.pop(0)
+                            continue
+
+                        deferred_pnl = matched_shares * (float(deficit_item["sell_nav"]) - confirm_nav)
+                        sell_record = processed_records_by_id[int(deficit_item["record_id"])]
+                        sell_record["realized_pnl"] = float(sell_record["realized_pnl"] or 0.0) + deferred_pnl
+                        sell_record["deficit_shares_remaining"] = max(
+                            0.0,
+                            float(sell_record["deficit_shares_remaining"] or 0.0) - matched_shares,
+                        )
+
+                        deficit_item["remaining_deficit_shares"] = max(
+                            0.0,
+                            float(deficit_item["remaining_deficit_shares"]) - matched_shares,
+                        )
+                        offset_shares += matched_shares
+                        remaining_buy_shares -= matched_shares
+                        realized_profit_amount += deferred_pnl
+
+                        if deficit_item["remaining_deficit_shares"] <= 1e-9:
+                            deficit_queue.pop(0)
+
+                    if remaining_buy_shares > 1e-9:
+                        position.add(remaining_buy_shares, confirm_nav, confirm_trade_date)
+                    status = DCA_STATUS_CONFIRMED
+                else:
+                    if sell_input_mode == DCA_SELL_INPUT_MODE_SHARES:
+                        if requested_shares is None:
+                            requested_shares = 0.0
+                        amount = round(requested_shares * confirm_nav, 2)
+                    else:
+                        if amount is None:
+                            amount = 0.0
+                        requested_shares = amount / confirm_nav
+                    shares = requested_shares
+                    covered_shares = min(requested_shares, position.total_shares)
+                    deficit_shares_remaining = max(0.0, requested_shares - covered_shares)
+                    fee = 0.0
+                    net_cash = 0.0
+                    realized_pnl = 0.0
+
+                    if covered_shares > 1e-9:
+                        covered_pnl, covered_fee, covered_cash = position.sell(
+                            covered_shares,
+                            confirm_nav,
+                            confirm_trade_date,
+                        )
+                        realized_pnl += covered_pnl
+                        fee += covered_fee
+                        net_cash += covered_cash
+                        realized_profit_amount += covered_pnl
+
+                    if deficit_shares_remaining > 1e-9:
+                        net_cash += deficit_shares_remaining * confirm_nav
+
+                    status = DCA_STATUS_CONFIRMED
+
+        if status == DCA_STATUS_PENDING:
+            pending_count += 1
+            if trade_type == DCA_TRADE_TYPE_SELL:
+                pending_sell_amount += amount or 0.0
+            else:
+                pending_buy_amount += amount or 0.0
+            confirm_nav_date = None
+            confirm_nav = None
+        elif status == DCA_STATUS_REJECTED:
+            rejected_count += 1
+
+        processed_records.append({
+            "id": row["id"],
+            "fund_code": fund_code,
+            "trade_date": trade_date_str,
+            "trade_type": trade_type,
+            "sell_input_mode": sell_input_mode,
+            "amount": amount,
+            "requested_shares": requested_shares,
+            "status": status,
+            "status_reason": status_reason,
+            "confirm_nav_date": confirm_nav_date,
+            "confirm_nav": confirm_nav,
+            "shares": shares,
+            "deficit_shares_remaining": deficit_shares_remaining,
+            "offset_shares": offset_shares,
+            "fee": fee,
+            "net_cash": net_cash,
+            "realized_pnl": realized_pnl,
+            "created_at": row["created_at"],
+            "confirmed_at": row["confirmed_at"] if status == DCA_STATUS_CONFIRMED else None,
+        })
+        processed_records_by_id[int(row["id"])] = processed_records[-1]
+
+        if (
+            trade_type == DCA_TRADE_TYPE_SELL
+            and status == DCA_STATUS_CONFIRMED
+            and deficit_shares_remaining > 1e-9
+            and confirm_nav is not None
+        ):
+            deficit_queue.append({
+                "record_id": int(row["id"]),
+                "sell_nav": float(confirm_nav),
+                "remaining_deficit_shares": deficit_shares_remaining,
+            })
+
+    remaining_cost_basis = sum(lot.shares * lot.cost_nav for lot in position.lots)
+    total_shares = position.total_shares
+    total_deficit_shares = sum(float(item["remaining_deficit_shares"]) for item in deficit_queue)
+    return {
+        "fund_code": fund_code,
+        "start_date": start_date,
+        "record_count": len(records),
+        "pending_count": pending_count,
+        "rejected_count": rejected_count,
+        "pending_buy_amount": pending_buy_amount,
+        "pending_sell_amount": pending_sell_amount,
+        "remaining_cost_basis": remaining_cost_basis,
+        "total_shares": total_shares,
+        "deficit_shares": total_deficit_shares,
+        "realized_profit_amount": realized_profit_amount,
+        "records": processed_records,
+    }
+
+
+def _get_current_dca_sell_capacity(fund_code: str) -> dict[str, float | None]:
+    rows = _load_dca_records(fund_code=fund_code)
+    if not rows:
+        return {"total_shares": 0.0, "latest_nav": None, "max_amount": None}
+
+    nav_conn = connect_sqlite(loader.db_path)
+    try:
+        nav_rows = _load_nav_rows_for_fund(nav_conn, fund_code)
+    finally:
+        nav_conn.close()
+
+    summary = _simulate_dca_fund_records(rows, nav_rows)
+    latest = _get_latest_nav_snapshot([fund_code]).get(fund_code, {})
+    latest_nav = latest.get("latest_nav")
+    total_shares = float(summary["total_shares"])
+    max_amount = total_shares * float(latest_nav) if latest_nav is not None else None
+    return {
+        "total_shares": total_shares,
+        "latest_nav": float(latest_nav) if latest_nav is not None else None,
+        "max_amount": max_amount,
+    }
+
+
 def _validate_dca_payload(data: dict):
     """校验手动定投录入参数。"""
     if not isinstance(data, dict):
@@ -730,16 +1129,47 @@ def _validate_dca_payload(data: dict):
     if not FUND_CODE_PATTERN.fullmatch(fund_code):
         raise ValueError("基金代码需为6位数字")
 
-    raw_amount = data.get("amount")
-    if isinstance(raw_amount, bool):
-        raise ValueError("买入金额必须为正数")
-    try:
-        amount = float(raw_amount)
-    except (TypeError, ValueError):
-        raise ValueError("买入金额必须为正数")
+    raw_trade_type = data.get("trade_type", DCA_TRADE_TYPE_BUY)
+    trade_type = str(raw_trade_type or DCA_TRADE_TYPE_BUY).strip().lower()
+    if trade_type not in {DCA_TRADE_TYPE_BUY, DCA_TRADE_TYPE_SELL}:
+        raise ValueError("trade_type 只能是 buy 或 sell")
+    trade_label = _dca_trade_label(trade_type)
+    sell_input_mode = None
+    amount: float | None = None
+    requested_shares: float | None = None
 
-    if not math.isfinite(amount) or amount <= 0:
-        raise ValueError("买入金额必须为正数")
+    if trade_type == DCA_TRADE_TYPE_BUY:
+        raw_amount = data.get("amount")
+        if isinstance(raw_amount, bool):
+            raise ValueError("买入金额必须为正数")
+        try:
+            amount = float(raw_amount)
+        except (TypeError, ValueError):
+            raise ValueError("买入金额必须为正数")
+        if not math.isfinite(amount) or amount <= 0:
+            raise ValueError("买入金额必须为正数")
+    else:
+        sell_input_mode = _normalize_dca_sell_input_mode(data.get("sell_input_mode"))
+        if sell_input_mode == DCA_SELL_INPUT_MODE_SHARES:
+            raw_shares = data.get("shares")
+            if isinstance(raw_shares, bool):
+                raise ValueError("卖出份额必须为正数")
+            try:
+                requested_shares = float(raw_shares)
+            except (TypeError, ValueError):
+                raise ValueError("卖出份额必须为正数")
+            if not math.isfinite(requested_shares) or requested_shares <= 0:
+                raise ValueError("卖出份额必须为正数")
+        else:
+            raw_amount = data.get("amount")
+            if isinstance(raw_amount, bool):
+                raise ValueError("卖出金额必须为正数")
+            try:
+                amount = float(raw_amount)
+            except (TypeError, ValueError):
+                raise ValueError("卖出金额必须为正数")
+            if not math.isfinite(amount) or amount <= 0:
+                raise ValueError("卖出金额必须为正数")
 
     raw_trade_date = data.get("trade_date", None)
     if raw_trade_date is None:
@@ -747,75 +1177,93 @@ def _validate_dca_payload(data: dict):
     else:
         trade_date_str = str(raw_trade_date).strip()
         if not trade_date_str:
-            raise ValueError("请选择买入日期")
+            raise ValueError(f"请选择{trade_label}日期")
         try:
             trade_date_value = datetime.strptime(trade_date_str, "%Y-%m-%d").date()
         except ValueError:
-            raise ValueError("买入日期格式必须为 YYYY-MM-DD")
+            raise ValueError(f"{trade_label}日期格式必须为 YYYY-MM-DD")
         if trade_date_value > date.today():
-            raise ValueError("买入日期不能晚于今天")
+            raise ValueError(f"{trade_label}日期不能晚于今天")
 
-    return fund_code, round(amount, 2), trade_date_value.isoformat()
+    return (
+        fund_code,
+        trade_type,
+        sell_input_mode,
+        round(amount, 2) if amount is not None else None,
+        round(requested_shares, 4) if requested_shares is not None else None,
+        trade_date_value.isoformat(),
+    )
 
 
 def _sync_dca_records():
-    """同步定投记录对应基金的最新净值，并确认待处理记录。"""
-    conn = connect_sqlite(REC_DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT fund_code FROM dca_records ORDER BY fund_code")
-    fund_codes = [row[0] for row in cursor.fetchall()]
-    cursor.execute("""
-        SELECT id, fund_code, trade_date, amount
-        FROM dca_records
-        WHERE status = ?
-        ORDER BY trade_date, id
-    """, (DCA_STATUS_PENDING,))
-    pending_records = cursor.fetchall()
-    conn.close()
-
-    if not fund_codes:
+    """同步定投记录对应基金的最新净值，并按交易顺序回放确认。"""
+    rows = _load_dca_records()
+    if not rows:
         return
 
-    for fund_code in fund_codes:
+    rows_by_fund: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    for row in rows:
+        rows_by_fund[str(row["fund_code"])].append(row)
+
+    for fund_code in sorted(rows_by_fund):
         try:
             loader.update_db(fund_code)
         except Exception as e:
             print(f"Warning: failed to sync NAV for {fund_code}: {e}")
 
-    if not pending_records:
-        return
-
     def _action():
         nav_conn = connect_sqlite(loader.db_path)
         rec_conn = connect_sqlite(REC_DB_PATH)
         try:
-            nav_cursor = nav_conn.cursor()
-            for record_id, fund_code, trade_date_str, amount in pending_records:
-                nav_cursor.execute("""
-                    SELECT date, nav
-                    FROM fund_nav
-                    WHERE fund_code = ? AND date >= ?
-                    ORDER BY date
-                    LIMIT 1
-                """, (fund_code, trade_date_str))
-                row = nav_cursor.fetchone()
-                if not row:
-                    continue
-
-                confirm_nav_date, confirm_nav = row
-                if confirm_nav is None:
-                    continue
-
-                confirm_nav = float(confirm_nav)
-                if confirm_nav <= 0:
-                    continue
-
-                shares = float(amount) / confirm_nav
-                rec_conn.execute("""
-                    UPDATE dca_records
-                    SET status = ?, confirm_nav_date = ?, confirm_nav = ?, shares = ?, confirmed_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                """, (DCA_STATUS_CONFIRMED, confirm_nav_date, confirm_nav, shares, record_id))
+            for fund_code, fund_rows in rows_by_fund.items():
+                nav_rows = _load_nav_rows_for_fund(nav_conn, fund_code)
+                simulated = _simulate_dca_fund_records(fund_rows, nav_rows)
+                for record in simulated["records"]:
+                    rec_conn.execute(f"""
+                        UPDATE dca_records
+                        SET
+                            trade_type = ?,
+                            sell_input_mode = ?,
+                            amount = ?,
+                            requested_shares = ?,
+                            status = ?,
+                            status_reason = ?,
+                            confirm_nav_date = ?,
+                            confirm_nav = ?,
+                            shares = ?,
+                            deficit_shares_remaining = ?,
+                            offset_shares = ?,
+                            fee = ?,
+                            net_cash = ?,
+                            realized_pnl = ?,
+                            confirmed_at = CASE
+                                WHEN ? = '{DCA_STATUS_CONFIRMED}'
+                                    THEN CASE
+                                        WHEN status = '{DCA_STATUS_CONFIRMED}'
+                                            THEN COALESCE(confirmed_at, CURRENT_TIMESTAMP)
+                                        ELSE CURRENT_TIMESTAMP
+                                    END
+                                ELSE NULL
+                            END
+                        WHERE id = ?
+                    """, (
+                        record["trade_type"],
+                        record["sell_input_mode"],
+                        record["amount"],
+                        record["requested_shares"],
+                        record["status"],
+                        record["status_reason"],
+                        record["confirm_nav_date"],
+                        record["confirm_nav"],
+                        record["shares"],
+                        record["deficit_shares_remaining"],
+                        record["offset_shares"],
+                        record["fee"],
+                        record["net_cash"],
+                        record["realized_pnl"],
+                        record["status"],
+                        record["id"],
+                    ))
 
             rec_conn.commit()
         finally:
@@ -843,7 +1291,7 @@ def _get_latest_nav_snapshot(fund_codes):
                 LIMIT 1
             """, (fund_code,))
             row = cursor.fetchone()
-            if row:
+            if row and row[1] is not None:
                 latest_nav_map[fund_code] = {
                     "latest_nav_date": row[0],
                     "latest_nav": float(row[1]),
@@ -926,9 +1374,16 @@ def _empty_dca_snapshot():
         "as_of_date": date.today().isoformat(),
         "portfolio": {
             "tracked_fund_count": 0,
-            "total_confirmed_amount": 0.0,
+            "total_remaining_cost_basis": 0.0,
+            "total_pending_buy_amount": 0.0,
+            "total_pending_sell_amount": 0.0,
+            "total_deficit_shares": 0.0,
             "total_pending_amount": 0.0,
             "total_value": 0.0,
+            "total_unrealized_profit_amount": 0.0,
+            "total_unrealized_profit_pct": None,
+            "total_realized_profit_amount": 0.0,
+            "total_confirmed_amount": 0.0,
             "total_profit_amount": 0.0,
             "total_profit_pct": None,
         },
@@ -939,16 +1394,7 @@ def _empty_dca_snapshot():
 
 def _build_dca_snapshot_from_db():
     """从本地数据库构建定投看板快照，不触发同步。"""
-    conn = connect_sqlite(REC_DB_PATH, row_factory=sqlite3.Row)
-    try:
-        rows = conn.execute("""
-            SELECT id, fund_code, trade_date, amount, status, confirm_nav_date, confirm_nav, shares, created_at
-            FROM dca_records
-            ORDER BY trade_date DESC, id DESC
-        """).fetchall()
-    finally:
-        conn.close()
-
+    rows = _load_dca_records()
     if not rows:
         return _empty_dca_snapshot()
 
@@ -956,101 +1402,106 @@ def _build_dca_snapshot_from_db():
     latest_nav_map = _get_latest_nav_snapshot(fund_codes)
     fund_name_map = _get_fund_name_map(fund_codes)
 
-    fund_metrics = {}
-    records = []
+    nav_conn = connect_sqlite(loader.db_path)
+    try:
+        rows_by_fund: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        for row in rows:
+            rows_by_fund[str(row["fund_code"])].append(row)
 
-    for row in rows:
-        amount = float(row["amount"])
-        confirm_nav = float(row["confirm_nav"]) if row["confirm_nav"] is not None else None
-        shares = float(row["shares"]) if row["shares"] is not None else None
+        funds = []
+        records = []
+        latest_dates: list[str] = []
+        total_remaining_cost_basis = 0.0
+        total_pending_buy_amount = 0.0
+        total_pending_sell_amount = 0.0
+        total_deficit_shares = 0.0
+        total_value = 0.0
+        total_unrealized_profit_amount = 0.0
+        total_realized_profit_amount = 0.0
 
-        records.append({
-            "id": row["id"],
-            "trade_date": row["trade_date"],
-            "fund_code": row["fund_code"],
-            "amount": amount,
-            "status": row["status"],
-            "confirm_nav_date": row["confirm_nav_date"],
-            "confirm_nav": confirm_nav,
-            "shares": shares,
-            "created_at": row["created_at"],
-        })
+        for fund_code, fund_rows in rows_by_fund.items():
+            nav_rows = _load_nav_rows_for_fund(nav_conn, fund_code)
+            simulated = _simulate_dca_fund_records(fund_rows, nav_rows)
+            latest = latest_nav_map.get(fund_code, {})
+            latest_nav = latest.get("latest_nav")
+            latest_nav_date = latest.get("latest_nav_date")
+            if latest_nav_date:
+                latest_dates.append(latest_nav_date)
 
-        fund = fund_metrics.setdefault(row["fund_code"], {
-            "fund_code": row["fund_code"],
-            "fund_name": fund_name_map.get(row["fund_code"]),
-            "start_date": row["trade_date"],
-            "confirmed_amount": 0.0,
-            "pending_amount": 0.0,
-            "total_shares": 0.0,
-            "record_count": 0,
-            "pending_count": 0,
-        })
-        if fund.get("fund_name") is None:
-            fund["fund_name"] = fund_name_map.get(row["fund_code"])
-        fund["start_date"] = min(fund["start_date"], row["trade_date"])
-        fund["record_count"] += 1
+            current_value = simulated["total_shares"] * latest_nav if latest_nav is not None else 0.0
+            unrealized_profit_amount = (
+                current_value - simulated["remaining_cost_basis"]
+                if latest_nav is not None else None
+            )
+            unrealized_profit_pct = (
+                unrealized_profit_amount / simulated["remaining_cost_basis"] * 100.0
+                if unrealized_profit_amount is not None and simulated["remaining_cost_basis"] > 0
+                else None
+            )
+            pending_amount = simulated["pending_buy_amount"] + simulated["pending_sell_amount"]
 
-        if row["status"] == DCA_STATUS_CONFIRMED:
-            fund["confirmed_amount"] += amount
-            fund["total_shares"] += shares or 0.0
-        else:
-            fund["pending_amount"] += amount
-            fund["pending_count"] += 1
+            funds.append({
+                "fund_code": fund_code,
+                "fund_name": fund_name_map.get(fund_code),
+                "start_date": simulated["start_date"],
+                "latest_nav": latest_nav,
+                "latest_nav_date": latest_nav_date,
+                "remaining_cost_basis": simulated["remaining_cost_basis"],
+                "pending_buy_amount": simulated["pending_buy_amount"],
+                "pending_sell_amount": simulated["pending_sell_amount"],
+                "pending_amount": pending_amount,
+                "total_shares": simulated["total_shares"],
+                "deficit_shares": simulated["deficit_shares"],
+                "current_value": current_value,
+                "unrealized_profit_amount": unrealized_profit_amount,
+                "unrealized_profit_pct": unrealized_profit_pct,
+                "realized_profit_amount": simulated["realized_profit_amount"],
+                "record_count": simulated["record_count"],
+                "pending_count": simulated["pending_count"],
+                "rejected_count": simulated["rejected_count"],
+                "confirmed_amount": simulated["remaining_cost_basis"],
+                "profit_amount": unrealized_profit_amount,
+                "profit_pct": unrealized_profit_pct,
+            })
 
-    funds = []
-    latest_dates = []
-    total_confirmed_amount = 0.0
-    total_pending_amount = 0.0
-    total_value = 0.0
+            total_remaining_cost_basis += simulated["remaining_cost_basis"]
+            total_pending_buy_amount += simulated["pending_buy_amount"]
+            total_pending_sell_amount += simulated["pending_sell_amount"]
+            total_deficit_shares += simulated["deficit_shares"]
+            total_value += current_value
+            total_realized_profit_amount += simulated["realized_profit_amount"]
+            if unrealized_profit_amount is not None:
+                total_unrealized_profit_amount += unrealized_profit_amount
 
-    for fund_code, fund in sorted(fund_metrics.items(), key=lambda item: (item[1]["start_date"], item[0])):
-        latest = latest_nav_map.get(fund_code, {})
-        latest_nav = latest.get("latest_nav")
-        latest_nav_date = latest.get("latest_nav_date")
-        if latest_nav_date:
-            latest_dates.append(latest_nav_date)
+            records.extend(simulated["records"])
+    finally:
+        nav_conn.close()
 
-        current_value = fund["total_shares"] * latest_nav if latest_nav is not None else 0.0
-        confirmed_amount = fund["confirmed_amount"]
-        profit_amount = current_value - confirmed_amount if confirmed_amount > 0 else 0.0
-        profit_pct = (profit_amount / confirmed_amount * 100.0) if confirmed_amount > 0 else None
+    funds.sort(key=lambda item: (item["start_date"], item["fund_code"]))
+    records.sort(key=lambda item: (item["trade_date"], item["id"]), reverse=True)
 
-        funds.append({
-            "fund_code": fund_code,
-            "fund_name": fund.get("fund_name"),
-            "start_date": fund["start_date"],
-            "latest_nav": latest_nav,
-            "latest_nav_date": latest_nav_date,
-            "confirmed_amount": confirmed_amount,
-            "pending_amount": fund["pending_amount"],
-            "total_shares": fund["total_shares"],
-            "current_value": current_value,
-            "profit_amount": profit_amount,
-            "profit_pct": profit_pct,
-            "record_count": fund["record_count"],
-            "pending_count": fund["pending_count"],
-        })
-
-        total_confirmed_amount += confirmed_amount
-        total_pending_amount += fund["pending_amount"]
-        total_value += current_value
-
-    total_profit_amount = total_value - total_confirmed_amount
-    total_profit_pct = (
-        total_profit_amount / total_confirmed_amount * 100.0
-        if total_confirmed_amount > 0 else None
+    total_pending_amount = total_pending_buy_amount + total_pending_sell_amount
+    total_unrealized_profit_pct = (
+        total_unrealized_profit_amount / total_remaining_cost_basis * 100.0
+        if total_remaining_cost_basis > 0 else None
     )
 
     return {
         "as_of_date": max(latest_dates) if latest_dates else date.today().isoformat(),
         "portfolio": {
             "tracked_fund_count": len(funds),
-            "total_confirmed_amount": total_confirmed_amount,
+            "total_remaining_cost_basis": total_remaining_cost_basis,
+            "total_pending_buy_amount": total_pending_buy_amount,
+            "total_pending_sell_amount": total_pending_sell_amount,
+            "total_deficit_shares": total_deficit_shares,
             "total_pending_amount": total_pending_amount,
             "total_value": total_value,
-            "total_profit_amount": total_profit_amount,
-            "total_profit_pct": total_profit_pct,
+            "total_unrealized_profit_amount": total_unrealized_profit_amount,
+            "total_unrealized_profit_pct": total_unrealized_profit_pct,
+            "total_realized_profit_amount": total_realized_profit_amount,
+            "total_confirmed_amount": total_remaining_cost_basis,
+            "total_profit_amount": total_unrealized_profit_amount,
+            "total_profit_pct": total_unrealized_profit_pct,
         },
         "funds": funds,
         "records": records,
@@ -1394,13 +1845,22 @@ def _build_dca_estimates_response(fund_codes: list[str], strict: bool = True) ->
     results = []
     for item in raw_results:
         is_failed = item.get("status") == "失败"
+        failure_message = None
+        if is_failed:
+            details = item.get("details")
+            if isinstance(details, dict):
+                failure_message = details.get("error")
+            if failure_message is None:
+                failure_message = item.get("error")
+            if failure_message is None:
+                failure_message = "严格模式暂不可用"
         results.append({
             "fund_code": item.get("fund_code"),
             "status": "failed" if is_failed else "success",
             "estimated_nav": item.get("estimated_nav"),
             "estimated_return": item.get("estimated_return"),
             "nav_date": item.get("nav_date"),
-            "message": "严格模式暂不可用" if is_failed else None,
+            "message": failure_message,
             "warnings": item.get("warnings") or [],
         })
 
@@ -1684,12 +2144,12 @@ def api_dca_estimates():
 
 @app.route("/api/dca/records", methods=["POST"])
 def api_create_dca_record():
-    """新增一条手动定投记录。"""
+    """新增一条手动买入或卖出记录。"""
     data = request.get_json(silent=True)
     if data is None:
         data = {}
     try:
-        fund_code, amount, trade_date_str = _validate_dca_payload(data)
+        fund_code, trade_type, sell_input_mode, amount, requested_shares, trade_date_str = _validate_dca_payload(data)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -1700,9 +2160,19 @@ def api_create_dca_record():
         try:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO dca_records (fund_code, trade_date, amount, status)
-                VALUES (?, ?, ?, ?)
-            """, (fund_code, trade_date_str, amount, DCA_STATUS_PENDING))
+                INSERT INTO dca_records (
+                    fund_code, trade_date, trade_type, sell_input_mode, amount, requested_shares, status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                fund_code,
+                trade_date_str,
+                trade_type,
+                sell_input_mode,
+                amount,
+                requested_shares,
+                DCA_STATUS_PENDING,
+            ))
             record_holder["id"] = cursor.lastrowid
             conn.commit()
         finally:
@@ -1716,7 +2186,13 @@ def api_create_dca_record():
         "id": record_id,
         "fund_code": fund_code,
         "trade_date": trade_date_str,
+        "trade_type": trade_type,
+        "sell_input_mode": sell_input_mode,
         "amount": amount,
+        "requested_shares": requested_shares,
+        "shares": requested_shares if sell_input_mode == DCA_SELL_INPUT_MODE_SHARES else None,
+        "deficit_shares_remaining": 0.0,
+        "offset_shares": 0.0,
         "status": DCA_STATUS_PENDING,
     }), 201
 

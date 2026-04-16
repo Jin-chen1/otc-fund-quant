@@ -183,6 +183,12 @@ A_SHARE_PROXY_TARGET_CALIBRATIONS = [
 ]
 
 TRACKING_TARGET_CALIBRATIONS = {
+    "002963": {
+        "target_type": "linked_etf_a_share",
+        "security_code": "159934",
+        "tracking_name": "易方达黄金ETF",
+        "market": "A股",
+    },
     "012733": {
         "target_type": "linked_etf_a_share",
         "security_code": "159819",
@@ -237,6 +243,12 @@ TRACKING_TARGET_CALIBRATIONS = {
         "tracking_name": "国泰中证港股通科技ETF",
         "market": "A股",
     },
+    "017193": {
+        "target_type": "linked_etf_a_share",
+        "security_code": "159157",
+        "tracking_name": "天弘中证工业有色金属主题ETF",
+        "market": "A股",
+    },
     "021034": {
         "target_type": "linked_etf_a_share",
         "security_code": "159566",
@@ -250,13 +262,26 @@ TRACKING_TARGET_CALIBRATIONS = {
         "market": "A股",
         "allow_non_linked": True,
     },
+    "022464": {
+        "target_type": "linked_etf_a_share",
+        "security_code": "563220",
+        "tracking_name": "富国中证A500ETF",
+        "market": "A股",
+    },
 }
 
 NON_EQUITY_BENCHMARK_KEYWORDS = [
     "中债",
+    "全债",
+    "综合债",
     "国债",
+    "政金债",
+    "金融债",
     "信用债",
     "债券",
+    "短融",
+    "中票",
+    "同业存单",
     "存款",
     "活期",
     "定期",

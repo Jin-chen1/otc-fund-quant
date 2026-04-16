@@ -62,10 +62,17 @@ class NAVEngine:
         )
 
     @staticmethod
+    def _is_missing_holdings_failure(error_message: str) -> bool:
+        return "未获取到基金" in error_message and "持仓数据" in error_message
+
+    @staticmethod
     def _log_estimation_failure(fund_code: str, error: Exception, *, stage: str) -> None:
         error_message = str(error)
         if NAVEngine._is_tracking_target_quote_failure(error_message):
             logger.warning(f"基金 {fund_code} {stage}失败: 跟踪标的行情失败, error={error_message}")
+            return
+        if NAVEngine._is_missing_holdings_failure(error_message):
+            logger.warning(f"基金 {fund_code} {stage}失败: 持仓数据缺失, error={error_message}")
             return
         if "实时行情源不支持该指数代码" in error_message:
             logger.warning(f"基金 {fund_code} {stage}失败: 指数行情不支持, error={error_message}")
@@ -83,9 +90,13 @@ class NAVEngine:
         logger.error(f"基金 {fund_code} {stage}失败: {error_message}")
 
     @staticmethod
-    def _classify_failure_reason(error_message: str) -> str:
+    def _classify_failure_reason(error_message: str, *, unsupported_reason: str | None = None) -> str:
+        if unsupported_reason is not None:
+            return "当前版本不支持"
         if NAVEngine._is_tracking_target_quote_failure(error_message):
             return "跟踪标的行情失败"
+        if NAVEngine._is_missing_holdings_failure(error_message):
+            return "持仓数据缺失"
         if "实时行情源不支持该指数代码" in error_message:
             return "指数行情不支持"
         if (
@@ -193,7 +204,10 @@ class NAVEngine:
             succeeded = len(df[df["status"] != "失败"])
             failed = len(df[df["status"] == "失败"])
             failure_counter = Counter(
-                self._classify_failure_reason(str(row.get("error", "")))
+                self._classify_failure_reason(
+                    str(row.get("error", "")),
+                    unsupported_reason=row.get("unsupported_reason"),
+                )
                 for row in df.to_dict(orient="records")
                 if row.get("status") == "失败"
             )

@@ -233,7 +233,7 @@
 
         .form-grid {
             display: grid;
-            grid-template-columns: minmax(160px, 220px) minmax(180px, 220px) minmax(220px, 280px) auto;
+            grid-template-columns: minmax(170px, 220px) minmax(160px, 220px) minmax(180px, 220px) minmax(220px, 280px) auto;
             gap: 14px;
             align-items: end;
         }
@@ -247,6 +247,63 @@
         .field label {
             font-size: 12px;
             color: var(--text-muted);
+        }
+
+        .trade-switch {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+        }
+
+        .sub-switch {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+        }
+
+        .trade-switch-btn {
+            height: 48px;
+            border-radius: 10px;
+            border: 1px solid var(--border-primary);
+            background: rgba(17, 24, 39, 0.85);
+            color: var(--text-secondary);
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .trade-switch-btn.active {
+            color: #fff;
+            border-color: rgba(56, 189, 248, 0.4);
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+        }
+
+        .trade-switch-btn.buy.active {
+            background: linear-gradient(135deg, rgba(52, 211, 153, 0.84), rgba(45, 212, 191, 0.72));
+        }
+
+        .trade-switch-btn.sell.active {
+            background: linear-gradient(135deg, rgba(248, 113, 113, 0.84), rgba(239, 68, 68, 0.72));
+        }
+
+        .sub-switch-btn {
+            height: 48px;
+            border-radius: 10px;
+            border: 1px solid var(--border-primary);
+            background: rgba(17, 24, 39, 0.85);
+            color: var(--text-secondary);
+            font-size: 13px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .sub-switch-btn.active {
+            color: #fff;
+            border-color: rgba(56, 189, 248, 0.35);
+            background: rgba(56, 189, 248, 0.18);
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
         }
 
         .input-field {
@@ -480,6 +537,12 @@
             border: 1px solid rgba(251, 191, 36, 0.24);
         }
 
+        .status-rejected {
+            color: var(--accent-sell);
+            background: rgba(248, 113, 113, 0.12);
+            border: 1px solid rgba(248, 113, 113, 0.24);
+        }
+
         .profit-panel {
             display: flex;
             align-items: center;
@@ -497,8 +560,8 @@
             font-weight: 700;
         }
 
-        .positive-text { color: var(--accent-buy); }
-        .negative-text { color: var(--accent-sell); }
+        .positive-text { color: var(--accent-sell); }
+        .negative-text { color: var(--accent-buy); }
         .profit-amount-positive { color: var(--accent-sell); }
         .profit-amount-negative { color: var(--accent-buy); }
         .neutral-text { color: var(--text-secondary); }
@@ -573,6 +636,40 @@
             padding: 12px;
             color: var(--text-secondary);
             white-space: nowrap;
+        }
+
+        .trade-pill {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 48px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 700;
+            border: 1px solid transparent;
+        }
+
+        .trade-pill-buy {
+            color: var(--accent-buy);
+            background: var(--accent-buy-bg);
+            border-color: rgba(52, 211, 153, 0.24);
+        }
+
+        .trade-pill-sell {
+            color: var(--accent-sell);
+            background: rgba(248, 113, 113, 0.12);
+            border-color: rgba(248, 113, 113, 0.24);
+        }
+
+        .table-subtext {
+            display: block;
+            margin-top: 6px;
+            color: var(--text-muted);
+            font-size: 11px;
+            line-height: 1.5;
+            white-space: normal;
+            max-width: 220px;
         }
 
         .delete-btn {
@@ -678,17 +775,17 @@
 <div class="page">
     <section class="card hero">
         <div class="hero-note">
-            <span class="hero-chip">手动定投录入</span>
-            <h1 class="hero-title">录入或补录买入金额，系统按下一可用净值确认份额，并持续计算当前盈利百分比。</h1>
-            <p class="hero-copy">
-                页面汇总口径按基金聚合。周末或节假日录入会自动顺延到下一有净值日确认，未确认金额会单独列出，不提前计入收益。
+            <span class="hero-chip">手动交易录入</span>
+            <h1 id="hero-title" class="hero-title">录入或补录买入金额，系统按下一可用净值确认份额，并持续计算持仓浮盈和已实现盈亏。</h1>
+            <p id="hero-copy" class="hero-copy">
+                页面汇总口径按基金聚合。周末或节假日录入会自动顺延到下一有净值日确认，未确认买入和未确认卖出会分别列出，不提前计入收益。
             </p>
         </div>
         <div class="hero-side">
             <span class="hero-chip">确认规则</span>
             <h2 class="hero-title">交易日之后首个净值日</h2>
-            <p class="hero-copy">
-                买入日期默认今天，也可以手动补录历史日期。份额确认后，当前价值按该基金最新可用净值滚动更新。
+            <p id="confirm-copy" class="hero-copy">
+                买入和卖出都按交易日之后首个可用净值日确认。卖出按赎回申请金额换算份额，并按现有规则自动扣减赎回费。
             </p>
         </div>
     </section>
@@ -696,25 +793,39 @@
     <section class="section">
         <div class="card form-card">
             <div class="section-head" style="margin-bottom: 18px;">
-                <h2>录入定投</h2>
+                <h2>录入交易</h2>
                 <span class="muted" style="font-size: 12px;">新增后自动刷新看板</span>
             </div>
             <div class="form-grid">
+                <div class="field">
+                    <label>交易类型</label>
+                    <div class="trade-switch">
+                        <button id="trade-type-buy" type="button" class="trade-switch-btn active" onclick="setTradeType('buy')">买入</button>
+                        <button id="trade-type-sell" type="button" class="trade-switch-btn" onclick="setTradeType('sell')">卖出</button>
+                    </div>
+                </div>
+                <div id="sell-input-mode-field" class="field hidden">
+                    <label>卖出方式</label>
+                    <div class="sub-switch">
+                        <button id="sell-mode-shares" type="button" class="sub-switch-btn active" onclick="setSellInputMode('shares')">按份额</button>
+                        <button id="sell-mode-amount" type="button" class="sub-switch-btn" onclick="setSellInputMode('amount')">按金额</button>
+                    </div>
+                </div>
                 <div class="field">
                     <label for="dca-fund-code">基金代码</label>
                     <input id="dca-fund-code" class="input-field mono" type="text" maxlength="6" inputmode="numeric" placeholder="如 007343">
                 </div>
                 <div class="field">
-                    <label for="dca-trade-date">买入日期</label>
+                    <label id="trade-date-label" for="dca-trade-date">买入日期</label>
                     <input id="dca-trade-date" class="input-field mono" type="date">
                 </div>
                 <div class="field">
-                    <label for="dca-amount">买入金额</label>
+                    <label id="trade-amount-label" for="dca-amount">买入金额</label>
                     <input id="dca-amount" class="input-field mono" type="number" min="0.01" step="0.01" placeholder="如 500.00">
                 </div>
-                <button id="submit-btn" class="btn-primary" onclick="submitRecord()">新增记录</button>
+                <button id="submit-btn" class="btn-primary" onclick="submitRecord()">新增买入</button>
             </div>
-            <div class="helper-text">
+            <div id="form-helper" class="helper-text">
                 买入日期默认今天，可手动选择历史日期；未来日期不可录入。系统不会要求你手工输入净值，待确认记录会在下一次刷新时尝试自动确认。
             </div>
             <div id="message-box" class="message hidden"></div>
@@ -736,7 +847,7 @@
             <h2>基金汇总</h2>
             <span id="fund-count-hint" class="muted" style="font-size: 12px;">0 只基金</span>
         </div>
-        <div id="fund-empty" class="empty-state hidden">暂无定投记录。新增一笔买入后，这里会按基金显示累计本金、份额和当前盈利百分比。</div>
+        <div id="fund-empty" class="empty-state hidden">暂无交易记录。新增一笔买入或卖出后，这里会按基金显示剩余持仓成本、份额、持仓浮盈和已实现盈亏。</div>
         <div id="fund-grid" class="fund-grid"></div>
     </section>
 
@@ -751,13 +862,16 @@
                 <table id="records-table" class="data-table hidden">
                     <thead>
                         <tr>
-                            <th>买入日</th>
+                            <th>交易日</th>
+                            <th>类型</th>
                             <th>基金代码</th>
                             <th>金额</th>
                             <th>状态</th>
                             <th>确认净值日</th>
                             <th>确认净值</th>
                             <th>份额</th>
+                            <th>到账/手续费</th>
+                            <th>已实现盈亏</th>
                             <th>创建时间</th>
                             <th>删除</th>
                         </tr>
@@ -777,7 +891,9 @@ let estimateMap = {};
 let estimateRequestSeq = 0;
 let portfolioRequestSeq = 0;
 let portfolioPollTimer = null;
-const DCA_SNAPSHOT_STORAGE_KEY = 'dca-dashboard-snapshot-v1';
+let currentTradeType = 'buy';
+let currentSellInputMode = 'shares';
+const DCA_SNAPSHOT_STORAGE_KEY = 'dca-dashboard-snapshot-v2';
 const DCA_SYNC_POLL_INTERVAL_MS = 2000;
 const DCA_SYNC_POLL_MAX_ATTEMPTS = 10;
 
@@ -796,6 +912,75 @@ function initTradeDateInput() {
     if (!input.value) {
         input.value = today;
     }
+}
+
+function currentTradeLabel() {
+    return currentTradeType === 'sell' ? '卖出' : '买入';
+}
+
+function currentSellInputLabel() {
+    return currentSellInputMode === 'shares' ? '卖出份额' : '卖出金额';
+}
+
+function currentSubmitLabel() {
+    return currentTradeType === 'sell' ? '新增卖出' : '新增买入';
+}
+
+function setTradeType(nextType) {
+    currentTradeType = nextType === 'sell' ? 'sell' : 'buy';
+    if (currentTradeType === 'sell') {
+        currentSellInputMode = 'shares';
+    }
+    syncTradeForm();
+}
+
+function setSellInputMode(nextMode) {
+    currentSellInputMode = nextMode === 'amount' ? 'amount' : 'shares';
+    syncTradeForm();
+}
+
+function syncTradeForm() {
+    const isSell = currentTradeType === 'sell';
+    const buyBtn = document.getElementById('trade-type-buy');
+    const sellBtn = document.getElementById('trade-type-sell');
+    const sellInputModeField = document.getElementById('sell-input-mode-field');
+    const sellModeSharesBtn = document.getElementById('sell-mode-shares');
+    const sellModeAmountBtn = document.getElementById('sell-mode-amount');
+    const amountInput = document.getElementById('dca-amount');
+    buyBtn.className = 'trade-switch-btn buy' + (isSell ? '' : ' active');
+    sellBtn.className = 'trade-switch-btn sell' + (isSell ? ' active' : '');
+    sellInputModeField.classList.toggle('hidden', !isSell);
+    sellModeSharesBtn.className = 'sub-switch-btn' + (isSell && currentSellInputMode === 'shares' ? ' active' : '');
+    sellModeAmountBtn.className = 'sub-switch-btn' + (isSell && currentSellInputMode === 'amount' ? ' active' : '');
+
+    document.getElementById('trade-date-label').textContent = isSell ? '卖出日期' : '买入日期';
+    document.getElementById('trade-amount-label').textContent = isSell ? currentSellInputLabel() : '买入金额';
+    document.getElementById('submit-btn').textContent = currentSubmitLabel();
+    amountInput.min = isSell && currentSellInputMode === 'shares' ? '0.0001' : '0.01';
+    amountInput.step = isSell && currentSellInputMode === 'shares' ? '0.0001' : '0.01';
+    amountInput.placeholder = isSell
+        ? (currentSellInputMode === 'shares' ? '如 100.0000' : '如 300.00')
+        : '如 500.00';
+    document.getElementById('hero-title').textContent = isSell
+        ? (currentSellInputMode === 'shares'
+            ? '录入或补录卖出份额，系统按下一可用净值确认成交，并自动计算赎回金额、到账金额与已实现盈亏。'
+            : '录入或补录卖出金额，系统按下一可用净值确认卖出份额，并自动计算到账金额与已实现盈亏。')
+        : '录入或补录买入金额，系统按下一可用净值确认份额，并持续计算持仓浮盈和已实现盈亏。';
+    document.getElementById('hero-copy').textContent = isSell
+        ? (currentSellInputMode === 'shares'
+            ? '卖出按份额录入。周末或节假日录入会自动顺延到下一有净值日确认，到账金额和手续费以确认净值为准。'
+            : '卖出金额表示赎回申请金额，不是实际到账净额。周末或节假日录入会自动顺延到下一有净值日确认，未确认卖出会单独列出。')
+        : '页面汇总口径按基金聚合。周末或节假日录入会自动顺延到下一有净值日确认，未确认买入和未确认卖出会分别列出，不提前计入收益。';
+    document.getElementById('confirm-copy').textContent = isSell
+        ? (currentSellInputMode === 'shares'
+            ? '卖出按交易日之后首个可用净值日确认，系统用申请份额和确认净值计算赎回金额，再按现有规则扣减赎回费。'
+            : '卖出按交易日之后首个可用净值日确认，系统自动换算卖出份额并按现有规则扣减赎回费。')
+        : '买入和卖出都按交易日之后首个可用净值日确认。卖出按赎回申请金额换算份额，并按现有规则自动扣减赎回费。';
+    document.getElementById('form-helper').textContent = isSell
+        ? (currentSellInputMode === 'shares'
+            ? '卖出日期默认今天，可手动选择历史日期；未来日期不可录入。按份额申请卖出，最终到账金额按确认净值和赎回费计算。'
+            : '卖出日期默认今天，可手动选择历史日期；未来日期不可录入。卖出金额为赎回申请金额，最终是否可成交仍以确认净值和当时可卖份额为准。')
+        : '买入日期默认今天，可手动选择历史日期；未来日期不可录入。系统不会要求你手工输入净值，待确认记录会在下一次刷新时尝试自动确认。';
 }
 
 function fmtMoney(value) {
@@ -1002,20 +1187,31 @@ function renderEstimateBox(fundCode) {
 function setSubmitLoading(loading) {
     const button = document.getElementById('submit-btn');
     button.disabled = loading;
-    button.textContent = loading ? '提交中...' : '新增记录';
+    button.textContent = loading ? '提交中...' : currentSubmitLabel();
 }
 
 function statusBadge(status, pendingCount = 0) {
     if (status === 'confirmed') {
         return '<span class="status-pill status-confirmed">已确认</span>';
     }
+    if (status === 'rejected') {
+        return '<span class="status-pill status-rejected">已驳回</span>';
+    }
     const suffix = pendingCount > 0 ? ' ' + pendingCount + ' 笔' : '';
     return '<span class="status-pill status-pending">待确认' + suffix + '</span>';
 }
 
+function tradeTypeBadge(tradeType) {
+    if (tradeType === 'sell') {
+        return '<span class="trade-pill trade-pill-sell">卖出</span>';
+    }
+    return '<span class="trade-pill trade-pill-buy">买入</span>';
+}
+
 function renderStats(portfolio) {
     const grid = document.getElementById('stats-grid');
-    const profitTone = profitClass(portfolio.total_profit_amount);
+    const unrealizedTone = profitClass(portfolio.total_unrealized_profit_amount);
+    const realizedTone = profitClass(portfolio.total_realized_profit_amount);
 
     const items = [
         {
@@ -1024,31 +1220,47 @@ function renderStats(portfolio) {
             sub: '当前已录入的基金数量'
         },
         {
-            label: '已确认本金',
-            value: fmtMoney(portfolio.total_confirmed_amount),
-            sub: '已用净值确认份额'
+            label: '持仓成本',
+            value: fmtMoney(portfolio.total_remaining_cost_basis),
+            sub: '卖出后剩余的持仓成本'
         },
         {
-            label: '待确认金额',
-            value: fmtMoney(portfolio.total_pending_amount),
-            sub: '暂不计入盈利'
+            label: '待确认买入',
+            value: fmtMoney(portfolio.total_pending_buy_amount),
+            sub: '待按净值确认份额'
+        },
+        {
+            label: '待确认卖出',
+            value: fmtMoney(portfolio.total_pending_sell_amount),
+            sub: '待按净值确认卖出'
+        },
+        {
+            label: '待补份额',
+            value: fmtShares(portfolio.total_deficit_shares),
+            sub: '超卖后等待后续买入冲抵'
         },
         {
             label: '当前市值',
             value: fmtMoney(portfolio.total_value),
-            sub: '按最新可用净值估算'
+            sub: '按最新可用净值估算剩余持仓'
         },
         {
-            label: '累计浮盈',
-            value: fmtMoney(portfolio.total_profit_amount),
-            sub: '当前市值 - 已确认本金',
-            extraClass: profitTone
+            label: '持仓浮盈',
+            value: fmtMoney(portfolio.total_unrealized_profit_amount),
+            sub: '当前市值 - 剩余持仓成本',
+            extraClass: unrealizedTone
         },
         {
-            label: '收益率',
-            value: fmtPct(portfolio.total_profit_pct),
-            sub: '仅基于已确认本金',
-            extraClass: profitTone
+            label: '持仓收益率',
+            value: fmtPct(portfolio.total_unrealized_profit_pct),
+            sub: '仅基于剩余持仓成本',
+            extraClass: unrealizedTone
+        },
+        {
+            label: '已实现盈亏',
+            value: fmtMoney(portfolio.total_realized_profit_amount),
+            sub: '已确认卖出的累计盈亏',
+            extraClass: realizedTone
         }
     ];
 
@@ -1074,21 +1286,33 @@ function renderFunds(funds) {
 
     empty.classList.add('hidden');
     container.innerHTML = funds.map(fund => {
-        const tone = fund.profit_amount > 0 ? 'positive' : fund.profit_amount < 0 ? 'negative' : '';
-        const profitTone = profitAmountClass(fund.profit_amount);
-        const profitAmountTone = profitAmountClass(fund.profit_amount);
+        const tone = fund.unrealized_profit_amount > 0 ? 'positive' : fund.unrealized_profit_amount < 0 ? 'negative' : '';
+        const unrealizedTone = profitClass(fund.unrealized_profit_amount);
+        const unrealizedAmountTone = profitAmountClass(fund.unrealized_profit_amount);
+        const realizedTone = profitClass(fund.realized_profit_amount);
         const fundCode = escapeHtml(fund.fund_code || '--');
         const fundName = fund.fund_name ? escapeHtml(fund.fund_name) : '';
         const navText = fund.latest_nav_date
             ? `${fund.latest_nav_date} / ${fmtNav(fund.latest_nav)}`
             : '暂无净值';
         const estimateHtml = renderEstimateBox(fund.fund_code);
-        const stateBadge = fund.pending_count > 0
-            ? statusBadge('pending', fund.pending_count)
-            : statusBadge('confirmed');
-        const pendingSummaryHtml = fund.pending_count > 0
-            ? `<div class="pending-summary"><span>累计待确认</span><strong class="mono">${fmtMoney(fund.pending_amount)}</strong></div>`
-            : '';
+        const badges = [
+            fund.pending_count > 0 ? statusBadge('pending', fund.pending_count) : statusBadge('confirmed'),
+            fund.rejected_count > 0 ? statusBadge('rejected') : ''
+        ].filter(Boolean);
+        const pendingSummaryParts = [];
+        if ((fund.pending_buy_amount || 0) > 0) {
+            pendingSummaryParts.push(`<div class="pending-summary"><span>待确认买入</span><strong class="mono">${fmtMoney(fund.pending_buy_amount)}</strong></div>`);
+        }
+        if ((fund.pending_sell_amount || 0) > 0) {
+            pendingSummaryParts.push(`<div class="pending-summary"><span>待确认卖出</span><strong class="mono">${fmtMoney(fund.pending_sell_amount)}</strong></div>`);
+        }
+        if ((fund.deficit_shares || 0) > 0) {
+            pendingSummaryParts.push(`<div class="pending-summary"><span>待补份额</span><strong class="mono">${fmtShares(fund.deficit_shares)}</strong></div>`);
+        }
+        if ((fund.rejected_count || 0) > 0) {
+            pendingSummaryParts.push(`<div class="pending-summary"><span>驳回记录</span><strong class="mono">${fund.rejected_count} 笔</strong></div>`);
+        }
 
         return `
             <div class="fund-card ${tone}">
@@ -1099,33 +1323,42 @@ function renderFunds(funds) {
                         <div class="muted" style="font-size: 12px;">定投起始 ${fund.start_date}</div>
                     </div>
                     <div class="fund-head-side">
-                        ${stateBadge}
-                        ${pendingSummaryHtml}
+                        <div style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end;">${badges.join('')}</div>
+                        ${pendingSummaryParts.join('')}
                         <div class="mono muted" style="font-size: 11px;">${navText}</div>
                         ${estimateHtml}
                     </div>
                 </div>
                 <div class="profit-panel">
                     <div>
-                        <div class="muted" style="font-size: 12px; margin-bottom: 6px;">当前盈利百分比</div>
-                        <div class="value mono ${profitTone}">${fmtPct(fund.profit_pct)}</div>
+                        <div class="muted" style="font-size: 12px; margin-bottom: 6px;">持仓收益率</div>
+                        <div class="value mono ${unrealizedTone}">${fmtPct(fund.unrealized_profit_pct)}</div>
                     </div>
                     <div style="text-align: right;">
-                        <div class="muted" style="font-size: 12px; margin-bottom: 6px;">累计浮盈金额</div>
-                        <div class="mono ${profitAmountTone}" style="font-size: 18px; font-weight: 700;">${fmtMoney(fund.profit_amount)}</div>
+                        <div class="muted" style="font-size: 12px; margin-bottom: 6px;">持仓浮盈金额</div>
+                        <div class="mono ${unrealizedAmountTone}" style="font-size: 18px; font-weight: 700;">${fmtMoney(fund.unrealized_profit_amount)}</div>
+                        <div class="mono ${realizedTone}" style="font-size: 12px; margin-top: 8px;">已实现 ${fmtMoney(fund.realized_profit_amount)}</div>
                     </div>
                 </div>
                 <div class="fund-metrics">
                     <div class="metric-box">
-                        <span class="label">已确认本金</span>
-                        <span class="value mono">${fmtMoney(fund.confirmed_amount)}</span>
+                        <span class="label">剩余持仓成本</span>
+                        <span class="value mono">${fmtMoney(fund.remaining_cost_basis)}</span>
                     </div>
                     <div class="metric-box">
-                        <span class="label">待确认金额</span>
-                        <span class="value mono">${fmtMoney(fund.pending_amount)}</span>
+                        <span class="label">待确认买入</span>
+                        <span class="value mono">${fmtMoney(fund.pending_buy_amount)}</span>
                     </div>
                     <div class="metric-box">
-                        <span class="label">累计份额</span>
+                        <span class="label">待确认卖出</span>
+                        <span class="value mono">${fmtMoney(fund.pending_sell_amount)}</span>
+                    </div>
+                    <div class="metric-box">
+                        <span class="label">待补份额</span>
+                        <span class="value mono">${fmtShares(fund.deficit_shares)}</span>
+                    </div>
+                    <div class="metric-box">
+                        <span class="label">剩余份额</span>
                         <span class="value mono">${fmtShares(fund.total_shares)}</span>
                     </div>
                     <div class="metric-box">
@@ -1163,12 +1396,39 @@ function renderRecords(records) {
     body.innerHTML = records.map(record => `
         <tr>
             <td class="mono">${record.trade_date}</td>
+            <td>${tradeTypeBadge(record.trade_type)}</td>
             <td class="mono" style="color: var(--accent-cyan); font-weight: 700;">${record.fund_code}</td>
-            <td class="mono">${fmtMoney(record.amount)}</td>
-            <td>${statusBadge(record.status)}</td>
+            <td class="mono">
+                ${record.trade_type === 'sell' && record.sell_input_mode === 'shares' && record.status === 'pending'
+                    ? '--'
+                    : fmtMoney(record.amount)}
+            </td>
+            <td>
+                ${statusBadge(record.status)}
+                ${record.status_reason ? `<span class="table-subtext">${escapeHtml(record.status_reason)}</span>` : ''}
+            </td>
             <td class="mono">${record.confirm_nav_date || '--'}</td>
             <td class="mono">${fmtNav(record.confirm_nav)}</td>
-            <td class="mono">${fmtShares(record.shares)}</td>
+            <td class="mono">
+                ${fmtShares(record.shares)}
+                ${record.trade_type === 'sell' && record.sell_input_mode === 'shares' && record.requested_shares !== null && record.requested_shares !== undefined
+                    ? `<span class="table-subtext">申请份额 ${fmtShares(record.requested_shares)}</span>`
+                    : ''}
+                ${record.trade_type === 'sell' && record.sell_input_mode !== 'shares' && record.amount !== null && record.amount !== undefined
+                    ? `<span class="table-subtext">申请金额 ${fmtMoney(record.amount)}</span>`
+                    : ''}
+                ${record.trade_type === 'sell' && Number(record.deficit_shares_remaining || 0) > 0
+                    ? `<span class="table-subtext">待补份额 ${fmtShares(record.deficit_shares_remaining)}</span>`
+                    : ''}
+                ${record.trade_type === 'buy' && Number(record.offset_shares || 0) > 0
+                    ? `<span class="table-subtext">自动抵扣 ${fmtShares(record.offset_shares)} 份</span>`
+                    : ''}
+            </td>
+            <td class="mono">
+                ${record.trade_type === 'sell' ? fmtMoney(record.net_cash) : '--'}
+                ${record.trade_type === 'sell' && record.fee !== null && record.fee !== undefined ? `<span class="table-subtext">手续费 ${fmtMoney(record.fee)}</span>` : ''}
+            </td>
+            <td class="mono ${profitClass(record.realized_pnl)}">${fmtMoney(record.realized_pnl)}</td>
             <td class="mono">${record.created_at || '--'}</td>
             <td>
                 <button class="delete-btn" onclick="deleteRecord(${record.id})" ${deletingRecordId === record.id ? 'disabled' : ''}>
@@ -1287,12 +1547,14 @@ async function submitRecord() {
         return;
     }
 
+    const tradeLabel = currentTradeLabel();
+    const valueLabel = currentTradeType === 'sell' ? currentSellInputLabel() : '买入金额';
     const fundCodeInput = document.getElementById('dca-fund-code');
     const tradeDateInput = document.getElementById('dca-trade-date');
     const amountInput = document.getElementById('dca-amount');
     const fundCode = fundCodeInput.value.trim();
     const tradeDate = tradeDateInput.value;
-    const amount = Number(amountInput.value);
+    const inputValue = Number(amountInput.value);
     const today = localTodayString();
 
     if (!/^\d{6}$/.test(fundCode)) {
@@ -1300,16 +1562,31 @@ async function submitRecord() {
         return;
     }
     if (!tradeDate) {
-        setMessage('请选择买入日期');
+        setMessage(`请选择${tradeLabel}日期`);
         return;
     }
     if (tradeDate > today) {
-        setMessage('买入日期不能晚于今天');
+        setMessage(`${tradeLabel}日期不能晚于今天`);
         return;
     }
-    if (!Number.isFinite(amount) || amount <= 0) {
-        setMessage('请输入大于 0 的买入金额');
+    if (!Number.isFinite(inputValue) || inputValue <= 0) {
+        setMessage(`请输入大于 0 的${valueLabel}`);
         return;
+    }
+
+    const payload = {
+        fund_code: fundCode,
+        trade_type: currentTradeType,
+        trade_date: tradeDate,
+    };
+    if (currentTradeType === 'sell' && currentSellInputMode === 'shares') {
+        payload.sell_input_mode = 'shares';
+        payload.shares = inputValue;
+    } else {
+        if (currentTradeType === 'sell') {
+            payload.sell_input_mode = 'amount';
+        }
+        payload.amount = inputValue;
     }
 
     clearMessage();
@@ -1320,21 +1597,17 @@ async function submitRecord() {
         const resp = await fetch('/api/dca/records', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                fund_code: fundCode,
-                trade_date: tradeDate,
-                amount: amount,
-            }),
+            body: JSON.stringify(payload),
         });
         const data = await resp.json();
         if (!resp.ok) {
-            setMessage(data.error || '新增记录失败');
+            setMessage(data.error || `${currentSubmitLabel()}失败`);
             return;
         }
 
         amountInput.value = '';
         tradeDateInput.value = today;
-        setMessage('记录已保存，正在刷新看板。', 'success');
+        setMessage(`${tradeLabel}记录已保存，正在刷新看板。`, 'success');
         await loadPortfolio();
     } catch (e) {
         setMessage('网络错误: ' + e.message);
@@ -1387,6 +1660,7 @@ document.getElementById('dca-amount').addEventListener('keypress', (event) => {
 });
 
 initTradeDateInput();
+syncTradeForm();
 const cachedSnapshot = restoreSnapshotFromSession();
 if (cachedSnapshot) {
     renderAll(cachedSnapshot);

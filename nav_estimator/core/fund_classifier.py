@@ -36,12 +36,14 @@ class FundClassifier:
         hk_keywords = ["港股", "恒生", "香港", "hk", "hsi", "港股通"]
         qdii_keywords = ["qdii", "纳斯达克", "标普", "道琼斯", "海外", "全球"]
 
-        if "qdii" in fund_type_lower or any(kw in fund_name_lower for kw in qdii_keywords):
-            return "qdii"
-
         calibrated_tracking_target = TRACKING_TARGET_CALIBRATIONS.get(str(fund_info.get("code", fund_code)).strip())
         if calibrated_tracking_target is not None and self.fund_fetcher.is_etf_or_linked_fund(fund_info):
             return "index_a"
+
+        if self._has_effective_qdii_marker(fund_name_lower, fund_type_lower) or any(
+            kw in fund_name_lower for kw in qdii_keywords
+        ):
+            return "qdii"
 
         if (
             "指数" in fund_name
@@ -109,6 +111,14 @@ class FundClassifier:
         if "a股" in benchmark_lower:
             return False
         return any(kw in fund_name_lower for kw in hk_keywords) or any(kw in benchmark_lower for kw in hk_keywords)
+
+    @staticmethod
+    def _has_effective_qdii_marker(fund_name_lower: str, fund_type_lower: str) -> bool:
+        qdii_negative_markers = ("非qdii", "非 qdii")
+        type_has_qdii = "qdii" in fund_type_lower and not any(
+            marker in fund_type_lower for marker in qdii_negative_markers
+        )
+        return type_has_qdii or "qdii" in fund_name_lower
 
     def get_estimator_params(self, fund_code: str, fund_type: FundType) -> dict:
         return {"fund_code": fund_code, "fund_type": fund_type}

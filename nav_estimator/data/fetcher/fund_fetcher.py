@@ -251,7 +251,7 @@ class FundFetcher(BaseFetcher):
         returns_df["fund_return"] = returns_df["fund_return"].astype(float)
         return returns_df.reset_index(drop=True)
 
-    @BaseFetcher.with_cache(ttl=86400)
+    @BaseFetcher.with_cache(ttl=86400, refresh_on_cached_empty_dataframe=True, cache_empty_dataframe=False)
     @BaseFetcher.retry_on_error(max_retries=3)
     def get_portfolio_holdings(self, fund_code: str, report_date: str | None = None) -> pd.DataFrame:
         logger.info(f"获取持仓数据: {fund_code}, 报告期: {report_date or '最新'}")
@@ -274,7 +274,7 @@ class FundFetcher(BaseFetcher):
         )
         return holdings_df.reset_index(drop=True)
 
-    @BaseFetcher.with_cache(ttl=86400)
+    @BaseFetcher.with_cache(ttl=86400, refresh_on_cached_empty_dataframe=True, cache_empty_dataframe=False)
     @BaseFetcher.retry_on_error(max_retries=3)
     def get_portfolio_holdings_history(self, fund_code: str, years: list[int] | None = None) -> pd.DataFrame:
         if years is None:
@@ -365,6 +365,79 @@ class FundFetcher(BaseFetcher):
             return json.loads(raw_payload)
         except json.JSONDecodeError as exc:
             raise ValueError(f"变量 {var_name} JSON 解析失败: {exc}") from exc
+
+    @staticmethod
+    def _normalize_pingzhongdata_timestamp_series(raw_values: pd.Series) -> pd.Series:
+        timestamps = pd.to_datetime(raw_values, unit="ms", utc=True, errors="coerce")
+        return timestamps.dt.tz_convert("Asia/Shanghai").dt.tz_localize(None).dt.normalize()
+
+    @classmethod
+    def _build_pingzhongdata_net_worth_trend_df(cls, fund_code: str, text: str) -> pd.DataFrame:
+        payload = cls._extract_pingzhongdata_var(text, "Data_netWorthTrend")
+        if not isinstance(payload, list):
+            raise ValueError(f"基金 {fund_code} 的 Data_netWorthTrend 结构异常")
+        if not payload:
+            raise ValueError(f"基金 {fund_code} 的 Data_netWorthTrend 为空")
+
+        net_worth_df = pd.DataFrame(payload)
+        required_columns = {"x", "y"}
+        missing_columns = sorted(required_columns.difference(net_worth_df.columns))
+        if missing_columns:
+            raise ValueError(f"基金 {fund_code} 的 Data_netWorthTrend 缺少字段: {missing_columns}")
+
+        net_worth_df = net_worth_df.copy()
+        net_worth_df["净值日期"] = cls._normalize_pingzhongdata_timestamp_series(net_worth_df["x"])
+        net_worth_df["单位净值"] = pd.to_numeric(net_worth_df["y"], errors="coerce")
+        if "equityReturn" in net_worth_df.columns:
+            net_worth_df["日增长率"] = pd.to_numeric(net_worth_df["equityReturn"], errors="coerce")
+        else:
+            net_worth_df["日增长率"] = pd.NA
+        net_worth_df = net_worth_df[["净值日期", "单位净值", "日增长率"]].dropna(subset=["净值日期", "单位净值"])
+        if net_worth_df.empty:
+            raise ValueError(f"基金 {fund_code} 的净值走势解析失败")
+        return net_worth_df
+
+    @classmethod
+    def _build_pingzhongdata_acc_worth_trend_df(cls, fund_code: str, text: str) -> pd.DataFrame:
+        payload = cls._extract_pingzhongdata_var(text, "Data_ACWorthTrend")
+        if not isinstance(payload, list):
+            raise ValueError(f"基金 {fund_code} 的 Data_ACWorthTrend 结构异常")
+
+        rows: list[dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            rows.append({"x": item[0], "累计净值": item[1]})
+
+        if not rows:
+            return pd.DataFrame(columns=["净值日期", "累计净值"])
+
+        acc_worth_df = pd.DataFrame(rows)
+        acc_worth_df["净值日期"] = cls._normalize_pingzhongdata_timestamp_series(acc_worth_df["x"])
+        acc_worth_df["累计净值"] = pd.to_numeric(acc_worth_df["累计净值"], errors="coerce")
+        acc_worth_df = acc_worth_df[["净值日期", "累计净值"]].dropna(subset=["净值日期", "累计净值"])
+        if acc_worth_df.empty:
+            return pd.DataFrame(columns=["净值日期", "累计净值"])
+        return acc_worth_df
+
+    @classmethod
+    def _build_pingzhongdata_nav_history_df(cls, fund_code: str, text: str) -> pd.DataFrame:
+        net_worth_df = cls._build_pingzhongdata_net_worth_trend_df(fund_code, text)
+        acc_worth_df = cls._build_pingzhongdata_acc_worth_trend_df(fund_code, text)
+
+        nav_history_df = net_worth_df.merge(acc_worth_df, on="净值日期", how="left")
+        nav_history_df["累计净值"] = nav_history_df["累计净值"].fillna(nav_history_df["单位净值"])
+        nav_history_df["日增长率"] = pd.to_numeric(nav_history_df["日增长率"], errors="coerce")
+        nav_history_df = nav_history_df.sort_values(by="净值日期", kind="mergesort").drop_duplicates(
+            subset=["净值日期"], keep="last"
+        )
+        return nav_history_df.reset_index(drop=True)
+
+    @classmethod
+    def get_pingzhongdata_nav_history_df(cls, fund_code: str) -> pd.DataFrame:
+        fetcher = cls()
+        text = fetcher._get_pingzhongdata_text(fund_code)
+        return cls._build_pingzhongdata_nav_history_df(fund_code, text)
 
     def _get_pingzhongdata_asset_allocation_payload(self, fund_code: str) -> dict[str, Any]:
         text = self._get_pingzhongdata_text(fund_code)
@@ -1204,6 +1277,8 @@ class FundFetcher(BaseFetcher):
                 if any(not (end <= span_start or start >= span_end) for span_start, span_end in occupied_spans):
                     continue
                 candidate_name = str(match.group(1)).strip()
+                if self._is_non_equity_benchmark_text(candidate_name):
+                    continue
                 if not self._is_formula_like_dynamic_a_index_candidate(
                     normalized_source_text,
                     start,
@@ -1546,7 +1621,11 @@ class FundFetcher(BaseFetcher):
             return_unresolved=True,
         )
         strict_mode = BaseFetcher._get_strict_mode_latched()
-        unresolved_weighted_components = [item for item in unresolved_components if item.get("raw_weight_pct") is not None]
+        unresolved_weighted_components = [
+            item
+            for item in unresolved_components
+            if item.get("raw_weight_pct") is not None and not self._is_non_equity_benchmark_text(item.get("name", ""))
+        ]
         if strict_mode is not False and unresolved_weighted_components:
             unresolved_text = self._format_unresolved_weighted_components(unresolved_weighted_components)
             raise ValueError(f"基金 {fund_info.get('code', '')} 的权益业绩基准存在未解析指数成分: {unresolved_text}")
@@ -1575,10 +1654,8 @@ class FundFetcher(BaseFetcher):
         analysis_text = self._build_analysis_text(fund_info).lower()
         return any(keyword in analysis_text for keyword in ["指数增强", "增强指数", "enhanced"])
 
-    @staticmethod
-    def _get_fund_nav_history_df(fund_code: str) -> tuple[pd.DataFrame, str]:
-        provider = AkshareHistoricalDataProvider()
-        nav_df = provider.get_fund_nav_history(symbol=fund_code)
+    def _get_fund_nav_history_df(self, fund_code: str) -> tuple[pd.DataFrame, str]:
+        nav_df = self.historical_provider.get_fund_nav_history(symbol=fund_code)
         if nav_df.empty:
             raise ValueError(f"未获取到基金 {fund_code} 的净值数据")
         if "单位净值" not in nav_df.columns:
@@ -1598,7 +1675,9 @@ class FundFetcher(BaseFetcher):
         nav_df = nav_df.dropna(subset=[date_column, "单位净值"])
         if nav_df.empty:
             raise ValueError(f"基金 {fund_code} 的净值走势解析失败")
-        nav_df = nav_df.sort_values(by=date_column).drop_duplicates(subset=[date_column], keep="last")
+        nav_df = nav_df.sort_values(by=date_column, kind="mergesort").drop_duplicates(
+            subset=[date_column], keep="last"
+        )
         return nav_df.reset_index(drop=True), date_column
 
     @staticmethod

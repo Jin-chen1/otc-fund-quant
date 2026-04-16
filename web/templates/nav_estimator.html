@@ -328,8 +328,8 @@
             font-size: 19px;
             font-weight: 700;
         }
-        .positive { color: var(--accent-buy); }
-        .negative { color: var(--accent-sell); }
+        .positive { color: var(--accent-sell); }
+        .negative { color: var(--accent-buy); }
         .detail-sections {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -902,7 +902,7 @@ function renderResults(results) {
             <td>${escapeHtml(formatFundType(item.fund_type))}</td>
             <td class="mono">${item.nav_date || '--'}</td>
             <td class="mono">${formatNumber(item.estimated_nav, 4)}</td>
-            <td class="mono">${formatPercent(item.estimated_return)}</td>
+            <td class="mono ${getSignedToneClass(item.estimated_return)}">${formatPercent(item.estimated_return)}</td>
             <td class="mono">${formatNumber(item.confidence_score, 4)}</td>
             <td><span class="warn-badge mono">${(item.warnings || []).length}</span></td>
         `;
@@ -983,7 +983,7 @@ function renderOverview(container, item, details) {
     const qualityPassed = details.quality_gate_passed;
     const qualityTone = qualityPassed === true ? 'ok' : qualityPassed === false ? 'fail' : 'info';
     const returnValue = formatPercent(item.estimated_return);
-    const returnTone = !hasMeaningfulValue(returnValue) ? '' : returnValue.startsWith('-') ? 'negative' : 'positive';
+    const returnTone = getSignedToneClass(item.estimated_return);
     const secondaryParts = [
         formatFundType(item.fund_type),
         details.qdii_market_profile ? `QDII画像 ${details.qdii_market_profile}` : null,
@@ -1260,6 +1260,11 @@ function formatPercent(value) {
     if (value == null || Number.isNaN(Number(value))) return '--';
     const num = Number(value);
     return `${num >= 0 ? '+' : ''}${num.toFixed(2)}%`;
+}
+
+function getSignedToneClass(value) {
+    if (value == null || Number.isNaN(Number(value))) return '';
+    return Number(value) < 0 ? 'negative' : 'positive';
 }
 
 function escapeHtml(value) {

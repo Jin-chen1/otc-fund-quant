@@ -500,7 +500,7 @@ class QDIIHKEstimator(BaseEstimator):
                 market = str(stock["market"])
                 if market == "港股":
                     code = code.zfill(5)
-                weight = self.validate_percentage(stock["weight"], f"持仓权重-{code}")
+                weight = self.validate_holding_weight_percentage(stock["weight"], f"持仓权重-{code}")
                 name = stock["name"]
                 top10_total_weight += weight
                 if code in all_prices:
