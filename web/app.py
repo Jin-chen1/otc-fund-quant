@@ -69,6 +69,7 @@ DCA_SNAPSHOT_STALE_TTL = timedelta(seconds=60)
 FUND_CODE_PATTERN = re.compile(r"^\d{6}$")
 NAV_ESTIMATOR_SUMMARY_KEYS = {
     "fund_code",
+    "fund_name",
     "status",
     "fund_type",
     "estimated_nav",
@@ -1747,11 +1748,21 @@ def _build_nav_estimator_response(results_df: pd.DataFrame, strict: bool) -> dic
         }
 
     records = [_to_json_safe(item) for item in results_df.to_dict(orient="records")]
+    fund_codes = sorted(
+        {
+            str(record.get("fund_code", "")).strip()
+            for record in records
+            if str(record.get("fund_code", "")).strip() != ""
+        }
+    )
+    fund_name_map = _get_fund_name_map(fund_codes)
     results = []
     succeeded = 0
     failed = 0
     for record in records:
         status = record.get("status")
+        fund_code = str(record.get("fund_code", "")).strip()
+        record["fund_name"] = fund_name_map.get(fund_code)
         warnings = record.get("warnings") or []
         if status == "失败":
             failed += 1

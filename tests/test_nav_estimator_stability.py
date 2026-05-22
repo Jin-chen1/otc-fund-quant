@@ -3303,6 +3303,45 @@ def test_nav_estimator_page_detail_layout_smoke():
     assert 'id="detail-breakdown"' not in html
 
 
+def test_nav_estimator_page_includes_history_estimates_section():
+    client = _client()
+    response = client.get("/nav-estimator")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+
+    assert 'id="history-estimates-section"' in html
+    assert 'id="history-estimates-list"' in html
+    assert "历史估值基金" in html
+    assert "暂无历史估值基金" in html
+
+
+def test_nav_estimator_page_includes_session_storage_state_restore_hooks():
+    client = _client()
+    response = client.get("/nav-estimator")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+
+    assert "nav-estimator-state-v1" in html
+    assert "function persistNavEstimatorState()" in html
+    assert "function applyRestoredNavEstimatorState()" in html
+    assert "function setEstimateButtonState(inFlight)" in html
+    assert "window.sessionStorage.setItem(NAV_ESTIMATOR_STORAGE_KEY" in html
+    assert "nav-estimator-history-v1" in html
+    assert "function restoreNavEstimatorHistory()" in html
+    assert "function persistNavEstimatorHistory()" in html
+    assert "function renderNavEstimatorHistory()" in html
+    assert "function recordNavEstimatorHistory(results)" in html
+    assert "function refillFundCodesFromHistory(fundCode)" in html
+    assert "window.localStorage.setItem(" in html
+    assert "const fundCodesEl = document.getElementById('fund-codes');" in html
+    assert "fundCodesEl.value = String(fundCode);" in html
+    assert "inFlight: Boolean(lastEstimateState.inFlight)" in html
+    assert "estimateNavs({ resumeInFlight: true })" in html
+    assert "bindNavEstimatorStatePersistence();" in html
+    assert "applyRestoredNavEstimatorState();" in html
+    assert "dca-dashboard-snapshot-v2" not in html
+
+
 def test_failure_response_preserves_quality_gate_details():
     frame = pd.DataFrame(
         [
@@ -3317,11 +3356,37 @@ def test_failure_response_preserves_quality_gate_details():
         ]
     )
 
-    payload = web_app._build_nav_estimator_response(frame, strict=True)
+    with patch.object(web_app, "_get_fund_name_map", return_value={"007343": "测试基金"}):
+        payload = web_app._build_nav_estimator_response(frame, strict=True)
     details = payload["results"][0]["details"]
 
+    assert payload["results"][0]["fund_name"] == "测试基金"
     assert details["quality_policy"] == "quality_first"
     assert details["quality_gate_failed_reasons"] == ["缺少基金披露股票总仓位"]
+
+
+def test_nav_estimator_response_includes_fund_name():
+    frame = pd.DataFrame(
+        [
+            {
+                "fund_code": "001770",
+                "status": "成功",
+                "fund_type": "active_a",
+                "estimated_nav": 2.1614,
+                "estimated_return": -0.16,
+                "nav_date": "2026-04-16",
+                "target_date": "2026-04-17",
+                "confidence_score": 1.0,
+                "warnings": [],
+            }
+        ]
+    )
+
+    with patch.object(web_app, "_get_fund_name_map", return_value={"001770": "前海开源嘉鑫灵活配置混合型证券投资基金"}):
+        payload = web_app._build_nav_estimator_response(frame, strict=True)
+
+    assert payload["results"][0]["fund_code"] == "001770"
+    assert payload["results"][0]["fund_name"] == "前海开源嘉鑫灵活配置混合型证券投资基金"
 
 
 def test_dca_estimates_response_preserves_backend_failure_message():

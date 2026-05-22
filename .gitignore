@@ -12,6 +12,7 @@ venv/
 env/
 
 # IDE and local workspace
+.cursor/
 .vscode/
 .idea/
 .windsurf/

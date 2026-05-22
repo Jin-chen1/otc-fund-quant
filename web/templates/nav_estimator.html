@@ -611,6 +611,56 @@
             color: var(--accent-sell);
             font-size: 13px;
         }
+        .history-estimates-card {
+            display: grid;
+            gap: 14px;
+        }
+        .history-estimates-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .history-estimates-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .history-estimate-item {
+            min-width: 180px;
+            max-width: 100%;
+            display: grid;
+            gap: 4px;
+            padding: 12px 14px;
+            border-radius: 12px;
+            border: 1px solid rgba(56, 189, 248, 0.16);
+            background: rgba(10, 14, 23, 0.42);
+            color: var(--text-primary);
+            cursor: pointer;
+            text-align: left;
+            transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+        }
+        .history-estimate-item:hover {
+            transform: translateY(-1px);
+            border-color: rgba(56, 189, 248, 0.38);
+            background: rgba(56, 189, 248, 0.08);
+        }
+        .history-estimate-code {
+            color: var(--accent-cyan);
+            font-size: 15px;
+            font-weight: 700;
+        }
+        .history-estimate-name {
+            color: var(--text-secondary);
+            font-size: 12px;
+            line-height: 1.5;
+            word-break: break-word;
+        }
+        .history-estimate-time {
+            color: var(--text-muted);
+            font-size: 11px;
+        }
         @media (max-width: 960px) {
             .input-area, .layout, .detail-sections { grid-template-columns: 1fr; }
             .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -619,6 +669,7 @@
             .summary-grid,
             .detail-list,
             .detail-overview-grid { grid-template-columns: 1fr; }
+            .history-estimate-item { width: 100%; }
         }
     </style>
 </head>
@@ -665,6 +716,19 @@
     </section>
 
     <div id="error-box" class="error hidden"></div>
+
+    <section class="card history-estimates-card" id="history-estimates-section">
+        <div class="history-estimates-head">
+            <div>
+                <div class="title" style="font-size: 16px; margin-bottom: 4px;">历史估值基金</div>
+                <div class="subtitle">点击任一基金回填代码，便于再次估值。</div>
+            </div>
+            <div class="mono" style="font-size: 12px; color: var(--text-muted);" id="history-estimates-count">0 条</div>
+        </div>
+        <div id="history-estimates-list">
+            <div class="empty">暂无历史估值基金</div>
+        </div>
+    </section>
 
     <section class="summary-grid">
         <div class="summary-item">
@@ -779,6 +843,14 @@
 <script>
 let currentResults = [];
 let selectedIndex = -1;
+let currentSummary = {};
+let lastEstimateState = null;
+let isEstimating = false;
+let historyEstimatedFunds = [];
+const NAV_ESTIMATOR_STORAGE_KEY = 'nav-estimator-state-v1';
+const NAV_ESTIMATOR_HISTORY_STORAGE_KEY = 'nav-estimator-history-v1';
+const NAV_ESTIMATOR_HISTORY_LIMIT = 8;
+const DEFAULT_UPDATE_TIME_TEXT = '--:--:--';
 const FUND_TYPE_LABELS = {
     active_a: '主动权益',
     active_hk: '港股主动',
@@ -859,6 +931,310 @@ const HOLDING_COLUMNS = [
     { key: 'contribution', label: '贡献', formatter: formatPercent, mono: true },
 ];
 
+function canUseSessionStorage() {
+    try {
+        return typeof window !== 'undefined' && typeof window.sessionStorage !== 'undefined';
+    } catch (e) {
+        return false;
+    }
+}
+
+function canUseLocalStorage() {
+    try {
+        return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+    } catch (e) {
+        return false;
+    }
+}
+
+function normalizeNavEstimatorHistoryEntry(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return null;
+    }
+    const fundCode = String(entry.fund_code || '').trim();
+    if (!/^\d{6}$/.test(fundCode)) {
+        return null;
+    }
+    return {
+        fund_code: fundCode,
+        fund_name: typeof entry.fund_name === 'string' ? entry.fund_name.trim() : '',
+        last_estimated_at: typeof entry.last_estimated_at === 'string' ? entry.last_estimated_at : '',
+    };
+}
+
+function restoreNavEstimatorHistory() {
+    if (!canUseLocalStorage()) {
+        return [];
+    }
+    try {
+        const raw = window.localStorage.getItem(NAV_ESTIMATOR_HISTORY_STORAGE_KEY);
+        if (!raw) {
+            return [];
+        }
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) {
+            return [];
+        }
+        return parsed
+            .map(normalizeNavEstimatorHistoryEntry)
+            .filter(Boolean)
+            .slice(0, NAV_ESTIMATOR_HISTORY_LIMIT);
+    } catch (e) {
+        return [];
+    }
+}
+
+function persistNavEstimatorHistory() {
+    if (!canUseLocalStorage()) {
+        return;
+    }
+    try {
+        window.localStorage.setItem(
+            NAV_ESTIMATOR_HISTORY_STORAGE_KEY,
+            JSON.stringify(historyEstimatedFunds.slice(0, NAV_ESTIMATOR_HISTORY_LIMIT)),
+        );
+    } catch (e) {
+        // ignore storage quota and privacy mode failures
+    }
+}
+
+function refillFundCodesFromHistory(fundCode) {
+    const fundCodesEl = document.getElementById('fund-codes');
+    if (!fundCodesEl || !fundCode) {
+        return;
+    }
+    fundCodesEl.value = String(fundCode);
+    fundCodesEl.focus();
+    if (typeof fundCodesEl.setSelectionRange === 'function') {
+        const length = fundCodesEl.value.length;
+        fundCodesEl.setSelectionRange(length, length);
+    }
+    persistNavEstimatorState();
+}
+
+function renderNavEstimatorHistory() {
+    const container = document.getElementById('history-estimates-list');
+    const countEl = document.getElementById('history-estimates-count');
+    if (!container || !countEl) {
+        return;
+    }
+
+    countEl.textContent = `${historyEstimatedFunds.length} 条`;
+    container.innerHTML = '';
+
+    if (historyEstimatedFunds.length === 0) {
+        container.innerHTML = '<div class="empty">暂无历史估值基金</div>';
+        return;
+    }
+
+    const list = document.createElement('div');
+    list.className = 'history-estimates-list';
+
+    historyEstimatedFunds.forEach((item) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'history-estimate-item';
+        button.addEventListener('click', () => refillFundCodesFromHistory(item.fund_code));
+        button.innerHTML = `
+            <span class="history-estimate-code mono">${escapeHtml(item.fund_code)}</span>
+            <span class="history-estimate-name">${escapeHtml(item.fund_name || '--')}</span>
+        `;
+        list.appendChild(button);
+    });
+
+    container.appendChild(list);
+}
+
+function recordNavEstimatorHistory(results) {
+    if (!Array.isArray(results) || results.length === 0) {
+        return;
+    }
+
+    const nextHistory = [...historyEstimatedFunds];
+    const now = new Date().toISOString();
+
+    results.forEach((item) => {
+        const fundCode = String(item?.fund_code || '').trim();
+        if (!/^\d{6}$/.test(fundCode)) {
+            return;
+        }
+
+        const normalizedEntry = normalizeNavEstimatorHistoryEntry({
+            fund_code: fundCode,
+            fund_name: typeof item?.fund_name === 'string' ? item.fund_name : '',
+            last_estimated_at: now,
+        });
+        if (!normalizedEntry) {
+            return;
+        }
+
+        const deduped = nextHistory.filter((historyItem) => historyItem.fund_code !== fundCode);
+        deduped.unshift(normalizedEntry);
+        nextHistory.length = 0;
+        nextHistory.push(...deduped);
+    });
+
+    historyEstimatedFunds = nextHistory.slice(0, NAV_ESTIMATOR_HISTORY_LIMIT);
+    persistNavEstimatorHistory();
+    renderNavEstimatorHistory();
+}
+
+function snapshotNavEstimatorFormState() {
+    return {
+        fundCodesText: document.getElementById('fund-codes')?.value || '',
+        strict: Boolean(document.getElementById('strict-mode')?.checked),
+    };
+}
+
+function snapshotNavEstimatorEstimateState() {
+    if (!lastEstimateState) {
+        return null;
+    }
+    return {
+        fundCodesText: lastEstimateState.fundCodesText || '',
+        strict: Boolean(lastEstimateState.strict),
+        summary: lastEstimateState.summary || {},
+        results: Array.isArray(lastEstimateState.results) ? lastEstimateState.results : [],
+        selectedIndex: Number.isInteger(lastEstimateState.selectedIndex) ? lastEstimateState.selectedIndex : 0,
+        updateTime: lastEstimateState.updateTime || DEFAULT_UPDATE_TIME_TEXT,
+        inFlight: Boolean(lastEstimateState.inFlight),
+    };
+}
+
+function persistNavEstimatorState() {
+    if (!canUseSessionStorage()) {
+        return;
+    }
+    try {
+        window.sessionStorage.setItem(NAV_ESTIMATOR_STORAGE_KEY, JSON.stringify({
+            form: snapshotNavEstimatorFormState(),
+            estimate: snapshotNavEstimatorEstimateState(),
+        }));
+    } catch (e) {
+        // ignore storage quota and privacy mode failures
+    }
+}
+
+function restoreNavEstimatorState() {
+    if (!canUseSessionStorage()) {
+        return null;
+    }
+    try {
+        const raw = window.sessionStorage.getItem(NAV_ESTIMATOR_STORAGE_KEY);
+        if (!raw) {
+            return null;
+        }
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') {
+            return null;
+        }
+        return parsed;
+    } catch (e) {
+        return null;
+    }
+}
+
+function rememberEstimateState(overrides = {}) {
+    const formState = snapshotNavEstimatorFormState();
+    lastEstimateState = {
+        fundCodesText: formState.fundCodesText,
+        strict: formState.strict,
+        summary: currentSummary || {},
+        results: currentResults || [],
+        selectedIndex,
+        updateTime: document.getElementById('update-time')?.textContent || DEFAULT_UPDATE_TIME_TEXT,
+        inFlight: isEstimating,
+        ...overrides,
+    };
+    persistNavEstimatorState();
+}
+
+function setEstimateButtonState(inFlight) {
+    const button = document.getElementById('estimate-btn');
+    isEstimating = Boolean(inFlight);
+    if (!button) {
+        return;
+    }
+    button.disabled = isEstimating;
+    button.textContent = isEstimating ? '估值中...' : '开始估值';
+}
+
+function applyRestoredNavEstimatorState() {
+    const state = restoreNavEstimatorState();
+    setEstimateButtonState(false);
+    if (!state || typeof state !== 'object') {
+        return;
+    }
+
+    const fundCodesEl = document.getElementById('fund-codes');
+    const strictModeEl = document.getElementById('strict-mode');
+    if (!fundCodesEl || !strictModeEl) {
+        return;
+    }
+
+    const restoredForm = state.form && typeof state.form === 'object' ? state.form : {};
+    fundCodesEl.value = typeof restoredForm.fundCodesText === 'string' ? restoredForm.fundCodesText : '';
+    strictModeEl.checked = Boolean(restoredForm.strict);
+
+    const restoredEstimate = state.estimate;
+    if (!restoredEstimate || typeof restoredEstimate !== 'object') {
+        return;
+    }
+
+    const restoredResults = Array.isArray(restoredEstimate.results) ? restoredEstimate.results : [];
+    const formMatchesEstimate = (
+        (restoredEstimate.fundCodesText || '') === fundCodesEl.value
+        && Boolean(restoredEstimate.strict) === strictModeEl.checked
+    );
+    if (!formMatchesEstimate || restoredResults.length === 0) {
+        if (formMatchesEstimate && restoredEstimate.inFlight) {
+            setEstimateButtonState(true);
+            rememberEstimateState({
+                inFlight: true,
+                fundCodesText: fundCodesEl.value,
+                strict: strictModeEl.checked,
+                results: [],
+                summary: currentSummary || {},
+                selectedIndex: -1,
+                updateTime: document.getElementById('update-time')?.textContent || DEFAULT_UPDATE_TIME_TEXT,
+            });
+            window.setTimeout(() => estimateNavs({ resumeInFlight: true }), 0);
+        }
+        return;
+    }
+
+    currentSummary = restoredEstimate.summary && typeof restoredEstimate.summary === 'object'
+        ? restoredEstimate.summary
+        : {};
+    setSummary(currentSummary);
+    document.getElementById('update-time').textContent = restoredEstimate.updateTime || DEFAULT_UPDATE_TIME_TEXT;
+    lastEstimateState = {
+        fundCodesText: fundCodesEl.value,
+        strict: strictModeEl.checked,
+        summary: currentSummary,
+        results: restoredResults,
+        selectedIndex: Number.isInteger(restoredEstimate.selectedIndex) ? restoredEstimate.selectedIndex : 0,
+        updateTime: restoredEstimate.updateTime || DEFAULT_UPDATE_TIME_TEXT,
+        inFlight: Boolean(restoredEstimate.inFlight),
+    };
+    renderResults(restoredResults, lastEstimateState.selectedIndex);
+    if (lastEstimateState.inFlight) {
+        setEstimateButtonState(true);
+        rememberEstimateState({ inFlight: true });
+        window.setTimeout(() => estimateNavs({ resumeInFlight: true }), 0);
+        return;
+    }
+    setEstimateButtonState(false);
+    rememberEstimateState();
+}
+
+function bindNavEstimatorStatePersistence() {
+    const fundCodesEl = document.getElementById('fund-codes');
+    const strictModeEl = document.getElementById('strict-mode');
+    fundCodesEl?.addEventListener('input', persistNavEstimatorState);
+    strictModeEl?.addEventListener('change', persistNavEstimatorState);
+}
+
 function setError(message) {
     const el = document.getElementById('error-box');
     if (!message) {
@@ -871,13 +1247,14 @@ function setError(message) {
 }
 
 function setSummary(summary) {
-    document.getElementById('summary-requested').textContent = summary.requested ?? 0;
-    document.getElementById('summary-succeeded').textContent = summary.succeeded ?? 0;
-    document.getElementById('summary-failed').textContent = summary.failed ?? 0;
-    document.getElementById('summary-strict').textContent = String(summary.strict_mode ?? true);
+    currentSummary = summary || {};
+    document.getElementById('summary-requested').textContent = currentSummary.requested ?? 0;
+    document.getElementById('summary-succeeded').textContent = currentSummary.succeeded ?? 0;
+    document.getElementById('summary-failed').textContent = currentSummary.failed ?? 0;
+    document.getElementById('summary-strict').textContent = String(currentSummary.strict_mode ?? true);
 }
 
-function renderResults(results) {
+function renderResults(results, preferredIndex = 0) {
     currentResults = results || [];
     const tbody = document.getElementById('results-body');
     const empty = document.getElementById('results-empty');
@@ -887,7 +1264,7 @@ function renderResults(results) {
 
     if (currentResults.length === 0) {
         empty.classList.remove('hidden');
-        renderDetail(null, -1);
+        renderDetail(null, -1, false);
         return;
     }
     empty.classList.add('hidden');
@@ -909,10 +1286,13 @@ function renderResults(results) {
         tbody.appendChild(tr);
     });
 
-    renderDetail(currentResults[0], 0);
+    const normalizedIndex = Number.isInteger(preferredIndex)
+        ? Math.max(0, Math.min(preferredIndex, currentResults.length - 1))
+        : 0;
+    renderDetail(currentResults[normalizedIndex], normalizedIndex, false);
 }
 
-function renderDetail(item, index) {
+function renderDetail(item, index, persistSelection = true) {
     selectedIndex = index;
     const tbodyRows = Array.from(document.querySelectorAll('#results-body tr'));
     tbodyRows.forEach((row, rowIndex) => row.classList.toggle('active', rowIndex === index));
@@ -975,6 +1355,9 @@ function renderDetail(item, index) {
     renderTable(holdingsTable, holdingsCount, details.holdings_details || [], HOLDING_COLUMNS, '暂无持仓明细。');
     detailJson.textContent = JSON.stringify(item, null, 2);
     detailRawJson.open = false;
+    if (persistSelection && item) {
+        rememberEstimateState();
+    }
 }
 
 function renderOverview(container, item, details) {
@@ -1274,10 +1657,13 @@ function escapeHtml(value) {
         .replaceAll('>', '&gt;');
 }
 
-async function estimateNavs() {
-    const button = document.getElementById('estimate-btn');
-    button.disabled = true;
-    button.textContent = '估值中...';
+async function estimateNavs(options = {}) {
+    const { resumeInFlight = false } = options;
+    if (isEstimating && !resumeInFlight) {
+        return;
+    }
+    setEstimateButtonState(true);
+    rememberEstimateState({ inFlight: true });
     setError('');
 
     try {
@@ -1291,6 +1677,8 @@ async function estimateNavs() {
         });
         const data = await response.json();
         if (!response.ok) {
+            setEstimateButtonState(false);
+            rememberEstimateState({ inFlight: false });
             setError(data.error || '请求失败');
             return;
         }
@@ -1301,13 +1689,20 @@ async function estimateNavs() {
             minute: '2-digit',
             second: '2-digit',
         });
+        setEstimateButtonState(false);
+        rememberEstimateState({ inFlight: false });
+        recordNavEstimatorHistory(data.results || []);
     } catch (error) {
+        setEstimateButtonState(false);
+        rememberEstimateState({ inFlight: false });
         setError(`网络错误: ${error.message}`);
-    } finally {
-        button.disabled = false;
-        button.textContent = '开始估值';
     }
 }
+
+bindNavEstimatorStatePersistence();
+applyRestoredNavEstimatorState();
+historyEstimatedFunds = restoreNavEstimatorHistory();
+renderNavEstimatorHistory();
 </script>
 </body>
 </html>
